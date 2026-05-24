@@ -2,7 +2,7 @@
 
 # Changelog
 
-## 0.1.1
+## 0.1.2
 
 - No user-facing changes.
 
@@ -18,6 +18,10 @@
 
 - **npm wrapper.** Install via `npm install pgspec`.
 - **PyPI wrapper.** Install via `pip install pgspec`.
+
+## 0.1.1
+
+- No user-facing changes.
 
 ## 0.1.0
 
