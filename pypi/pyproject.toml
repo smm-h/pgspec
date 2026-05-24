@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pgspec"
+version = "0.1.0"
+description = "PostgreSQL schema compiler with strict enforcement, NF auditing, and declarative migrations"
+license = "MIT"
+requires-python = ">=3.8"
+readme = "README.md"
+keywords = ["rlsbl"]
+
+[project.urls]
+Homepage = "https://github.com/smm-h/pgspec"
+Repository = "https://github.com/smm-h/pgspec"
+
+[project.scripts]
+pgspec = "pgspec:main"

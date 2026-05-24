@@ -1,0 +1,6 @@
+dist/
+build/
+*.egg-info/
+__pycache__/
+pgspec/_bin/pgspec
+pgspec/_bin/pgspec.exe
