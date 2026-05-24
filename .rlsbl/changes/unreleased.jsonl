@@ -1,4 +1,0 @@
-{"commits":["9ef2b4bfa8a44bd53930343289b0013ed082063d"],"user_facing":true,"description":"**npm wrapper.** Install via `npm install pgspec`.","type":"feature"}
-{"commits":["a56966353c10312cd897df4e2b28672f3d4aa254"],"user_facing":true,"description":"**PyPI wrapper.** Install via `pip install pgspec`.","type":"feature"}
-{"commits":["bc71941106b4880b48ae7578f3b2ad94114a4937"],"user_facing":false}
-{"commits":["340e1e4b3beea8f3ee73fee43354e3b05407ba9b"],"user_facing":false}
