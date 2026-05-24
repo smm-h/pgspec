@@ -5,7 +5,7 @@ Shared risk classification for schema change operations. Used by diff/ and migra
 ## Types
 
 - `RiskLevel` -- enum: Safe, Caution, Dangerous.
-- `LockType` -- enum: None, ShareRowExclusive, AccessExclusive, ShareUpdateExclusive.
+- `LockType` -- enum: None, ShareLock, ShareRowExclusive, ShareUpdateExclusive, AccessExclusive.
 - `Classification` -- struct: RiskLevel, LockType, Reversible (bool), DataLoss (bool), RequiresDML (bool), Suggestion (string -- safe alternative).
 
 ## Classifier
@@ -57,3 +57,5 @@ Risk can escalate based on table size:
 - >10M rows: even metadata-only operations should use lock_timeout
 
 The classifier accepts estimated row count from pg_stat_user_tables.n_live_tup (available during migrate with --db connection).
+
+All threshold logic lives exclusively in this package. Both diff/ and migrate/ call risk.Classify with table context. No other package duplicates threshold checks.

@@ -36,6 +36,6 @@ When `idempotent = true`, statements use:
 
 ## Design notes
 
-This package has no dependencies on model/ types -- it accepts primitives (strings, slices). This allows migrate/ to call the same builders without depending on model/. If model/ types are convenient, thin adapter functions convert model types to primitive arguments.
+This package accepts model/ types directly. Both generate/ and migrate/ depend on model/ anyway, so there is no benefit to a primitive-only interface. The sql/ package is the single place where SQL text is constructed -- no other package builds SQL strings directly.
 
-Actually: this package DOES accept model/ types for convenience. generate/ and migrate/ both depend on model/ anyway. The sql/ package is the single place where SQL text is constructed -- no other package builds SQL strings directly.
+`ConstraintName()` is the single source of truth for auto-generated constraint names. model.enrich() calls sql.ConstraintName() -- it does not have its own naming logic.

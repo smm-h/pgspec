@@ -10,7 +10,8 @@ CLI entry point. Uses strictcli.
 - `pgdesign fmt <file|dir>` -- Normalize TOML schema files to canonical form. Flags: `--check` (exit 1 if not canonical, don't write).
 - `pgdesign introspect --db <url> --schema <name>` -- Connect to live DB, extract schema to TOML. Flags: `--output <path>`.
 - `pgdesign diff <file> --db <url>` -- Diff desired TOML vs live DB. Print changes with risk classification. Flags: `--json`.
-- `pgdesign migrate generate <file> --db <url>` -- Diff and produce a migration file in migrations/ dir. Detects DML needs, generates placeholders.
+- `pgdesign migrate plan <file> --db <url>` -- Like terraform plan. Shows what migration ops would be generated (including expand-contract) without writing files. Subsumes diff + migration-specific logic.
+- `pgdesign migrate generate <file> --db <url>` -- Diff and produce a migration file in migrations/ dir. Prompts for version (or `--version`). Detects DML needs, generates placeholders.
 - `pgdesign migrate apply --db <url>` -- Apply pending migrations from migrations/ dir. Acquires advisory lock. Per-migration atomicity. Auto-detects non-transactional ops.
 - `pgdesign migrate rollback --db <url>` -- Rollback most recent migration via stored down ops. Blocks on irreversible.
 - `pgdesign migrate status --db <url>` -- Show applied/pending migrations.

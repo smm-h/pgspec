@@ -95,7 +95,7 @@ Checksum = SHA256 of migration file contents. Detects tampering.
 
 `Apply(conn *pgx.Conn, migrationsDir string) ([]AppliedMigration, error)`
 
-1. Acquire advisory lock: `SELECT pg_try_advisory_xact_lock(hashtext('pgdesign_migrate'))`. If fails: error "another migration in progress."
+1. Acquire session-level advisory lock: `SELECT pg_try_advisory_lock(hashtext('pgdesign_migrate'))`. If fails: error "another migration in progress." Session-level lock survives transaction boundaries (needed because non-transactional ops commit mid-migration). Released explicitly at end of apply, or automatically on disconnect.
 2. Read pgdesign_migrations state. Determine pending migrations (version > max applied, sorted by semver).
 3. For each pending migration:
    a. Begin transaction (for transactional ops)
@@ -110,7 +110,7 @@ Checksum = SHA256 of migration file contents. Detects tampering.
 
 `Rollback(conn *pgx.Conn, migrationsDir string) error`
 
-1. Acquire advisory lock.
+1. Acquire session-level advisory lock (`pg_try_advisory_lock`).
 2. Read most recent applied migration version from pgdesign_migrations.
 3. Load that migration file. Check for irreversible ops -- if any, block with error.
 4. Execute down ops in REVERSE declaration order.
@@ -147,6 +147,19 @@ Type change (text -> integer):
 5. rename_column new_col -> old_col
 
 Generated as a single migration file with all steps in order.
+
+## Plan command
+
+`pgdesign migrate plan <file> --db <url>` -- Like `terraform plan`. Diffs desired vs live, computes migration ops (including expand-contract transformations), prints the full plan without writing any files. Subsumes what diff/ shows but adds the migration-specific logic (DML detection, expand-contract, safety warnings).
+
+## Expand-contract for large tables
+
+When estimated table size exceeds a configurable threshold (default 10M rows from pgdesign.toml `[migrate].expand_contract_threshold`), expand-contract steps are generated as SEPARATE migration files rather than a single file. This gives independent atomicity to each step:
+- `0.2.0.toml` -- add nullable column
+- `0.2.1.toml` -- backfill DML
+- `0.2.2.toml` -- set NOT NULL + drop old column
+
+For tables below the threshold, all steps remain in one file.
 
 ## Dry-run
 

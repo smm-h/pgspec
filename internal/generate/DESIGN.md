@@ -10,6 +10,7 @@ Options:
 - Idempotent (bool) -- IF NOT EXISTS guards
 - IncludeComments (bool, default true)
 - Format (SQL | D2 | JSON)
+- PGVersion (int, e.g. 14) -- Target PostgreSQL major version. Controls conditional syntax: GENERATED ALWAYS AS requires PG12+, identity columns require PG10+, ALTER TYPE ADD VALUE in transaction requires PG12+. Read from pgdesign.toml `[database].pg_version` or auto-detected by introspect/.
 
 ## Emission order
 

@@ -42,6 +42,12 @@ Options:
 
 Tables with >20 columns: emit Info diagnostic, skip discovery, suggest user declare FDs manually or select a subset of columns.
 
+## Parallelism and progress
+
+TANE runs per-table in bounded goroutines (default: GOMAXPROCS). A progress callback reports which table is being analyzed and estimated completion. For a 50-table database at 5000 rows/table with <=15 columns each, total time is ~2-5 minutes with parallelism.
+
+`--tables <list>` flag limits discovery to specific tables (skip the rest). Useful for targeting known problem areas.
+
 ## Integration
 
 `pgdesign audit --db <url>` calls discover/ for each table lacking declared FDs. Discovered FDs are passed to audit/ for NF analysis. Results clearly marked as "inferred from data sample" (vs. declared).

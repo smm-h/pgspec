@@ -9,7 +9,7 @@ Resolved intermediate representation (IR). The canonical in-memory schema that a
 Internally phased:
 1. `resolve()` -- Expand semantic types into PG types + attributes. Resolve enum references. Apply column-level overrides (nullable, default). Resolve generated columns.
 2. `order()` -- Build FK dependency graph. Topological sort (Kahn's algorithm). Detect cycles, group them. Produce `TableOrder` (DAG tables sorted) + `CycleGroups` (mutually-referencing clusters).
-3. `enrich()` -- Materialize auto-indexes for FK columns (skipped if HasIndexCovering). Auto-generate constraint names where not explicitly provided. Compute candidate keys (for NF audit). Resolve FK ref_table names (bare = same schema, qualified = cross-schema).
+3. `enrich()` -- Materialize auto-indexes for FK columns (skipped if HasIndexCovering). Auto-generate constraint names via sql.ConstraintName() (model/ has no naming logic of its own). Compute candidate keys (for NF audit). Resolve FK ref_table names (bare = same schema, qualified = cross-schema).
 
 If resolve() fails on some tables, it still returns a partial IR for the tables that succeeded, allowing downstream passes to report on what they can.
 

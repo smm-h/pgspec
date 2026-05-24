@@ -67,6 +67,7 @@ migrations_dir = "migrations"
 
 [database]
 url = ""  # set via --db flag or environment variable
+pg_version = 18  # target PostgreSQL major version (controls conditional syntax)
 
 [format]
 file_granularity = "per_schema"
@@ -81,6 +82,7 @@ max_columns = 30
 [migrate]
 lock_timeout = "5s"
 auto_concurrent_threshold = 10000
+expand_contract_threshold = 10000000
 
 [[extensions]]
 # User-defined extension capabilities (supplements built-in registry)

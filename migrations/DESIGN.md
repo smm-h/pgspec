@@ -19,10 +19,11 @@ The TOML schema files are the source of truth. Migration files are derived artif
 
 ## Version numbering
 
-The tool auto-assigns the next version based on the change magnitude:
-- New tables or major structural changes: minor bump (0.1.0 -> 0.2.0)
-- Column additions, index changes: patch bump (0.1.0 -> 0.1.1)
-- User can override when generating
+The version is always user-specified. When running `pgdesign migrate generate`, the tool prompts for the next version (or accepts `--version 0.2.0` flag). No auto-heuristic -- the user decides whether a change is patch or minor.
+
+## Collision handling
+
+If two developers generate migrations from the same baseline, they may pick the same version. This manifests as a git merge conflict on the filename. Resolution: dev B re-generates with the next available version. This is a workflow convention, not a tool-enforced constraint.
 
 ## State
 

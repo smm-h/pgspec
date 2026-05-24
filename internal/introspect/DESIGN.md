@@ -4,7 +4,9 @@ Live PostgreSQL database introspection. Extracts schema into the resolved IR.
 
 ## Function
 
-`Introspect(conn *pgx.Conn, schemaName string) (*model.Schema, []Diagnostic)`
+`Introspect(conn *pgx.Conn, schemaNames []string) (*model.Schema, []Diagnostic)`
+
+Accepts multiple schema names to introspect atomically in one pass. Cross-schema FK references are resolved within the same introspection. Returns a unified Schema containing tables from all listed schemas.
 
 ## Data sources (pg_catalog)
 
@@ -42,6 +44,10 @@ A future `pgdesign adopt` command could suggest semantic type mappings (e.g., "t
 `Export(schema *model.Schema) ([]byte, error)` -- Serializes the IR back to pgdesign TOML format using go-toml-edit for clean, formatted output. This enables bootstrapping: introspect an existing DB, export to TOML, commit, now it's managed by pgdesign.
 
 Export respects pgdesign.toml format settings (column order, table order) if a config exists.
+
+## PG version detection
+
+On connect, queries `SHOW server_version` to determine the PG major version. Stores in the returned Schema for use by generate/ (conditional syntax emission) and risk/ (version-specific lock behavior).
 
 ## Connection
 

@@ -15,7 +15,7 @@ Each rule is a function: `func(schema *model.Schema) []Diagnostic`. A registry h
 | E202 | table-missing-comment | Table has no comment |
 | E203 | table-missing-pk | Table has no primary key (no explicit pk, no id-typed column) |
 | E204 | fk-ref-not-found | FK references a table or column that doesn't exist in schema |
-| E205 | circular-fk | Circular FK dependency detected (warning, not error -- generates ALTER TABLE) |
+| E205 | (removed, moved to W008) | |
 | E206 | duplicate-index | Index is a prefix of another index on same table |
 | E207 | varchar-usage | varchar(N) used; should use text + CHECK |
 | E208 | timestamp-no-tz | timestamp without time zone used; should use timestamptz |
@@ -38,6 +38,7 @@ Each rule is a function: `func(schema *model.Schema) []Diagnostic`. A registry h
 | W005 | missing-timestamps | Non-join table has no created_at or updated_at column. |
 | W006 | prefer-text | char(n) usage. Suggest text. |
 | W007 | redundant-index | Index columns are a subset of another index (not just prefix). |
+| W008 | circular-fk | Circular FK dependency detected. Handled gracefully via ALTER TABLE (not blocking). |
 
 ## Configurable rules
 
