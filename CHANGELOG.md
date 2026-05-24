@@ -2,12 +2,18 @@
 
 # Changelog
 
+## 1.0.0
+
+### Breaking
+
+- **Renamed from pgspec to pgdesign.**
+
 ## 0.2.0
 
 ### Features
 
-- **npm wrapper.** Install via `npm install pgdesign`.
-- **PyPI wrapper.** Install via `pip install pgdesign`.
+- **npm wrapper.** Install via `npm install pgspec`.
+- **PyPI wrapper.** Install via `pip install pgspec`.
 
 ## 0.1.0
 
