@@ -40,6 +40,26 @@ func File(path string) (*RawSchema, []diagnostic.Diagnostic) {
 	return schema, p.diags
 }
 
+// Bytes parses TOML bytes and returns a RawSchema with diagnostics.
+// Like File but operates on in-memory bytes instead of reading from disk.
+func Bytes(data []byte) (*RawSchema, []diagnostic.Diagnostic) {
+	doc, err := tomledit.Parse(data)
+	if err != nil {
+		return nil, []diagnostic.Diagnostic{{
+			Severity: diagnostic.Error,
+			Code:     "E002",
+			Message:  fmt.Sprintf("TOML parse error: %v", err),
+		}}
+	}
+
+	p := &parser{
+		doc:  doc,
+		file: "<bytes>",
+	}
+	schema := p.walk()
+	return schema, p.diags
+}
+
 // parser holds state during AST walking.
 type parser struct {
 	doc   *tomledit.DocumentNode

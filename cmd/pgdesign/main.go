@@ -1,12 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 
 	"github.com/smm-h/pgdesign/internal/audit"
 	"github.com/smm-h/pgdesign/internal/diagnostic"
 	"github.com/smm-h/pgdesign/internal/extregistry"
+	"github.com/smm-h/pgdesign/internal/format"
 	"github.com/smm-h/pgdesign/internal/generate"
 	"github.com/smm-h/pgdesign/internal/model"
 	"github.com/smm-h/pgdesign/internal/parse"
@@ -39,8 +41,15 @@ func main() {
 		strictcli.WithArgs(strictcli.NewArg("file", "Path to schema file")),
 	)
 
-	app.Command("fmt", "Format a pgdesign schema file or directory", notImplemented,
+	app.Command("fmt", "Format a pgdesign schema file or directory", handleFmt,
 		strictcli.WithArgs(strictcli.NewArg("path", "Path to file or directory")),
+		strictcli.WithFlags(
+			strictcli.BoolFlag("check", "Check if file is already formatted (exit 1 if not)"),
+			strictcli.StringFlag("table-order", "Table ordering: dependency or alphabetical",
+				strictcli.Default("dependency"), strictcli.Choices("dependency", "alphabetical")),
+			strictcli.StringFlag("column-order", "Column ordering: pk_fk_alpha, alphabetical, fk_last, or preserve",
+				strictcli.Default("pk_fk_alpha"), strictcli.Choices("pk_fk_alpha", "alphabetical", "fk_last", "preserve")),
+		),
 	)
 
 	app.Command("introspect", "Introspect a live PostgreSQL database", notImplemented)
@@ -232,6 +241,41 @@ func parseAndBuild(filePath string) (*model.Schema, int) {
 	}
 
 	return schema, 0
+}
+
+func handleFmt(kwargs map[string]interface{}) int {
+	filePath := kwargs["path"].(string)
+
+	input, err := os.ReadFile(filePath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: cannot read file: %v\n", err)
+		return 1
+	}
+
+	config := &format.Config{
+		TableOrder:  kwargs["table_order"].(string),
+		ColumnOrder: kwargs["column_order"].(string),
+	}
+
+	formatted, err := format.Format(input, config)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		return 1
+	}
+
+	if kwargs["check"].(bool) {
+		if bytes.Equal(input, formatted) {
+			return 0
+		}
+		fmt.Fprintf(os.Stderr, "%s: not formatted\n", filePath)
+		return 1
+	}
+
+	if err := os.WriteFile(filePath, formatted, 0o644); err != nil {
+		fmt.Fprintf(os.Stderr, "error: cannot write file: %v\n", err)
+		return 1
+	}
+	return 0
 }
 
 func notImplemented(_ map[string]interface{}) int {
