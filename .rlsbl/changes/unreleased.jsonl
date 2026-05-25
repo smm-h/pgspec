@@ -4,3 +4,4 @@
 {"commits":["feaafab4c2393c0640f6a7669f07a9034a87c85f"],"user_facing":true,"description":"**Fix unique index generation.** Indexes with unique=true now emit CREATE UNIQUE INDEX.","type":"fix"}
 {"commits":["2f67bed8dd60ac7670a94c2d33e298deed150763"],"user_facing":false}
 {"commits":["c90a5c1fb81a47f067fc2b9937f9952c7da1d4da"],"user_facing":false}
+{"commits":["a79fdd2a55b76415cbe1d1b3565b5a555c5807ea"],"user_facing":false}
