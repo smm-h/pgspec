@@ -1,0 +1,215 @@
+package migrate
+
+import (
+	"context"
+	"crypto/sha256"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+
+	"github.com/jackc/pgx/v5"
+)
+
+// Apply discovers pending migrations in migrationsDir, applies them in semver
+// order, and returns the list of applied versions.
+func Apply(ctx context.Context, conn *pgx.Conn, migrationsDir string) ([]string, error) {
+	if err := EnsureMigrationsTable(ctx, conn); err != nil {
+		return nil, err
+	}
+
+	// Acquire advisory lock.
+	acquired, err := AcquireAdvisoryLock(ctx, conn)
+	if err != nil {
+		return nil, err
+	}
+	if !acquired {
+		return nil, fmt.Errorf("another migration is in progress (could not acquire advisory lock)")
+	}
+	defer ReleaseAdvisoryLock(ctx, conn)
+
+	// Discover migration files.
+	migrations, err := discoverMigrations(migrationsDir)
+	if err != nil {
+		return nil, fmt.Errorf("discover migrations: %w", err)
+	}
+
+	// Get already-applied versions.
+	applied, err := AppliedVersions(ctx, conn)
+	if err != nil {
+		return nil, err
+	}
+	appliedSet := make(map[string]bool, len(applied))
+	for _, v := range applied {
+		appliedSet[v] = true
+	}
+
+	// Determine pending migrations.
+	var pending []migrationFile
+	for _, mf := range migrations {
+		if !appliedSet[mf.version] {
+			pending = append(pending, mf)
+		}
+	}
+
+	if len(pending) == 0 {
+		return nil, nil
+	}
+
+	var appliedVersions []string
+	for _, mf := range pending {
+		if err := applyOne(ctx, conn, mf); err != nil {
+			return appliedVersions, fmt.Errorf("migration %s: %w", mf.version, err)
+		}
+		appliedVersions = append(appliedVersions, mf.version)
+	}
+
+	return appliedVersions, nil
+}
+
+type migrationFile struct {
+	version  string
+	path     string
+	checksum string
+}
+
+// discoverMigrations finds all *.toml files in the migrations directory,
+// parses their version from the filename, and sorts by semver.
+func discoverMigrations(dir string) ([]migrationFile, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, fmt.Errorf("read migrations dir: %w", err)
+	}
+
+	var files []migrationFile
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".toml") {
+			continue
+		}
+		version := strings.TrimSuffix(e.Name(), ".toml")
+		if _, _, _, err := semverParts(version); err != nil {
+			continue // Skip non-semver files.
+		}
+
+		path := filepath.Join(dir, e.Name())
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("read %s: %w", path, err)
+		}
+		checksum := fmt.Sprintf("%x", sha256.Sum256(data))
+
+		files = append(files, migrationFile{
+			version:  version,
+			path:     path,
+			checksum: checksum,
+		})
+	}
+
+	sort.Slice(files, func(i, j int) bool {
+		return compareSemver(files[i].version, files[j].version) < 0
+	})
+
+	return files, nil
+}
+
+// applyOne applies a single migration within a transaction, handling
+// non-transactional ops by committing/re-opening transactions as needed.
+func applyOne(ctx context.Context, conn *pgx.Conn, mf migrationFile) error {
+	m, err := ParseMigrationFile(mf.path)
+	if err != nil {
+		return fmt.Errorf("parse: %w", err)
+	}
+
+	// Set lock_timeout for this session.
+	if _, err := conn.Exec(ctx, "SET lock_timeout = '5s'"); err != nil {
+		return fmt.Errorf("set lock_timeout: %w", err)
+	}
+
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin: %w", err)
+	}
+	defer tx.Rollback(ctx) // No-op if already committed.
+
+	for i, op := range m.DDLOps {
+		sqlStmt := OpToSQL(op)
+		if sqlStmt == "" {
+			continue
+		}
+
+		if IsNonTransactional(op) {
+			// Commit current transaction, execute outside, start new one.
+			if err := tx.Commit(ctx); err != nil {
+				return fmt.Errorf("commit before non-transactional op %d (%s): %w", i, op.Op, err)
+			}
+
+			// Execute each statement in the multi-statement string separately.
+			for _, stmt := range splitStatements(sqlStmt) {
+				if _, err := conn.Exec(ctx, stmt); err != nil {
+					return fmt.Errorf("non-transactional op %d (%s): %w", i, op.Op, err)
+				}
+			}
+
+			tx, err = conn.Begin(ctx)
+			if err != nil {
+				return fmt.Errorf("begin after non-transactional op %d: %w", i, err)
+			}
+			defer tx.Rollback(ctx)
+			continue
+		}
+
+		// Execute each statement separately within the transaction.
+		for _, stmt := range splitStatements(sqlStmt) {
+			if _, err := tx.Exec(ctx, stmt); err != nil {
+				return fmt.Errorf("DDL op %d (%s): %w\n  SQL: %s", i, op.Op, err, stmt)
+			}
+		}
+	}
+
+	// Execute DML ops.
+	for i, op := range m.DMLOps {
+		if op.SQL == "" {
+			continue
+		}
+		if _, err := tx.Exec(ctx, op.SQL); err != nil {
+			return fmt.Errorf("DML op %d (%s): %w\n  SQL: %s", i, op.Op, err, op.SQL)
+		}
+	}
+
+	// Record in migrations table.
+	if _, err := tx.Exec(ctx,
+		"INSERT INTO pgdesign_migrations (version, checksum, description) VALUES ($1, $2, $3)",
+		mf.version, mf.checksum, m.Description); err != nil {
+		return fmt.Errorf("record migration: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit: %w", err)
+	}
+
+	return nil
+}
+
+// splitStatements splits a multi-statement SQL string (separated by ";\n")
+// into individual statements.
+func splitStatements(sql string) []string {
+	// Split by semicolons but keep each as a complete statement.
+	var stmts []string
+	for _, s := range strings.Split(sql, ";\n") {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			continue
+		}
+		// Ensure statement ends with semicolon.
+		if !strings.HasSuffix(s, ";") {
+			s += ";"
+		}
+		stmts = append(stmts, s)
+	}
+	// If no split happened, return the whole thing.
+	if len(stmts) == 0 && strings.TrimSpace(sql) != "" {
+		return []string{strings.TrimSpace(sql)}
+	}
+	return stmts
+}

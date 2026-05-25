@@ -1,0 +1,327 @@
+package migrate
+
+import (
+	"fmt"
+	"strings"
+
+	"github.com/smm-h/pgdesign/internal/model"
+	"github.com/smm-h/pgdesign/internal/sql"
+)
+
+// OpToSQL converts a DDLOp to a SQL statement.
+func OpToSQL(op DDLOp) string {
+	switch op.Op {
+	case "create_table":
+		return opCreateTable(op)
+	case "drop_table":
+		return opDropTable(op)
+	case "add_column":
+		return opAddColumn(op)
+	case "drop_column":
+		return opDropColumn(op)
+	case "alter_column_type":
+		return opAlterColumnType(op)
+	case "set_not_null":
+		return opSetNotNull(op)
+	case "drop_not_null":
+		return opDropNotNull(op)
+	case "alter_column_default":
+		return opAlterColumnDefault(op)
+	case "drop_column_default":
+		return opDropColumnDefault(op)
+	case "rename_column":
+		return opRenameColumn(op)
+	case "rename_table":
+		return opRenameTable(op)
+	case "add_fk":
+		return opAddFK(op)
+	case "drop_fk":
+		return opDropFK(op)
+	case "create_index", "add_index":
+		return opCreateIndex(op)
+	case "drop_index":
+		return opDropIndex(op)
+	case "create_index_concurrently":
+		return opCreateIndexConcurrently(op)
+	case "drop_index_concurrently":
+		return opDropIndexConcurrently(op)
+	case "add_unique":
+		return opAddUnique(op)
+	case "drop_unique":
+		return opDropUnique(op)
+	case "add_check":
+		return opAddCheck(op)
+	case "drop_check":
+		return opDropCheck(op)
+	case "create_enum":
+		return opCreateEnum(op)
+	case "alter_enum_add_value":
+		return opAlterEnumAddValue(op)
+	case "drop_enum":
+		return opDropEnum(op)
+	case "set_owner":
+		return opSetOwner(op)
+	default:
+		return fmt.Sprintf("-- unknown op: %s", op.Op)
+	}
+}
+
+// IsNonTransactional returns true if the op must run outside a transaction.
+func IsNonTransactional(op DDLOp) bool {
+	switch op.Op {
+	case "create_index_concurrently", "drop_index_concurrently", "alter_enum_add_value":
+		return true
+	default:
+		return false
+	}
+}
+
+func opCreateTable(op DDLOp) string {
+	if op.TableDef != nil {
+		schema, _ := splitQualifiedName(op.Table)
+		return sql.CreateTable(op.TableDef, schema, false)
+	}
+
+	// Fallback: generate from op fields (no full table def available).
+	return fmt.Sprintf("CREATE TABLE %s ();", quoteQualified(op.Table))
+}
+
+func opDropTable(op DDLOp) string {
+	return fmt.Sprintf("DROP TABLE %s;", quoteQualified(op.Table))
+}
+
+func opAddColumn(op DDLOp) string {
+	var parts []string
+	parts = append(parts, fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s",
+		quoteQualified(op.Table), sql.QuoteIdent(op.Column), op.Type))
+	if op.NotNull {
+		parts = append(parts, "NOT NULL")
+	}
+	if op.Default != nil {
+		parts = append(parts, fmt.Sprintf("DEFAULT %s", formatDefault(op.Default, op.Type)))
+	}
+	return strings.Join(parts, " ") + ";"
+}
+
+func opDropColumn(op DDLOp) string {
+	return fmt.Sprintf("ALTER TABLE %s DROP COLUMN %s;",
+		quoteQualified(op.Table), sql.QuoteIdent(op.Column))
+}
+
+func opAlterColumnType(op DDLOp) string {
+	return fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s TYPE %s;",
+		quoteQualified(op.Table), sql.QuoteIdent(op.Column), op.Type)
+}
+
+func opSetNotNull(op DDLOp) string {
+	return fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s SET NOT NULL;",
+		quoteQualified(op.Table), sql.QuoteIdent(op.Column))
+}
+
+func opDropNotNull(op DDLOp) string {
+	return fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s DROP NOT NULL;",
+		quoteQualified(op.Table), sql.QuoteIdent(op.Column))
+}
+
+func opAlterColumnDefault(op DDLOp) string {
+	return fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s SET DEFAULT %s;",
+		quoteQualified(op.Table), sql.QuoteIdent(op.Column), formatDefault(op.Default, op.Type))
+}
+
+func opDropColumnDefault(op DDLOp) string {
+	return fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s DROP DEFAULT;",
+		quoteQualified(op.Table), sql.QuoteIdent(op.Column))
+}
+
+func opRenameColumn(op DDLOp) string {
+	return fmt.Sprintf("ALTER TABLE %s RENAME COLUMN %s TO %s;",
+		quoteQualified(op.Table), sql.QuoteIdent(op.Column), sql.QuoteIdent(op.Name))
+}
+
+func opRenameTable(op DDLOp) string {
+	return fmt.Sprintf("ALTER TABLE %s RENAME TO %s;",
+		quoteQualified(op.Table), sql.QuoteIdent(op.Name))
+}
+
+func opAddFK(op DDLOp) string {
+	localCols := quoteIdentSlice(op.Columns)
+	refCols := quoteIdentSlice(op.RefCols)
+
+	stmt := fmt.Sprintf("ALTER TABLE %s ADD CONSTRAINT %s FOREIGN KEY (%s) REFERENCES %s (%s)",
+		quoteQualified(op.Table), sql.QuoteIdent(op.Name),
+		strings.Join(localCols, ", "),
+		quoteQualified(op.RefTable), strings.Join(refCols, ", "))
+
+	if op.OnDelete != "" {
+		stmt += " ON DELETE " + strings.ToUpper(op.OnDelete)
+	}
+	return stmt + ";"
+}
+
+func opDropFK(op DDLOp) string {
+	return fmt.Sprintf("ALTER TABLE %s DROP CONSTRAINT %s;",
+		quoteQualified(op.Table), sql.QuoteIdent(op.Name))
+}
+
+func opCreateIndex(op DDLOp) string {
+	idx := &model.Index{
+		Name:    op.Name,
+		Columns: op.Columns,
+		Method:  op.Method,
+		Opclass: op.Opclass,
+		Where:   op.Where,
+		Include: op.Include,
+	}
+	schema, tableName := splitQualifiedName(op.Table)
+	return sql.CreateIndex(schema, idx, tableName, false)
+}
+
+func opDropIndex(op DDLOp) string {
+	schema, _ := splitQualifiedName(op.Table)
+	if schema != "" {
+		return fmt.Sprintf("DROP INDEX %s.%s;", sql.QuoteIdent(schema), sql.QuoteIdent(op.Name))
+	}
+	return fmt.Sprintf("DROP INDEX %s;", sql.QuoteIdent(op.Name))
+}
+
+func opCreateIndexConcurrently(op DDLOp) string {
+	colExprs := quoteIdentSlice(op.Columns)
+	for i := range colExprs {
+		if op.Opclass != "" {
+			colExprs[i] += " " + op.Opclass
+		}
+	}
+
+	schema, tableName := splitQualifiedName(op.Table)
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("CREATE INDEX CONCURRENTLY %s ON %s",
+		sql.QuoteIdent(op.Name), sql.QualifiedName(schema, tableName)))
+
+	if op.Method != "" && strings.ToLower(op.Method) != "btree" {
+		sb.WriteString(fmt.Sprintf(" USING %s", op.Method))
+	}
+
+	sb.WriteString(fmt.Sprintf(" (%s)", strings.Join(colExprs, ", ")))
+
+	if len(op.Include) > 0 {
+		sb.WriteString(fmt.Sprintf(" INCLUDE (%s)", strings.Join(quoteIdentSlice(op.Include), ", ")))
+	}
+	if op.Where != "" {
+		sb.WriteString(fmt.Sprintf(" WHERE %s", op.Where))
+	}
+	sb.WriteString(";")
+	return sb.String()
+}
+
+func opDropIndexConcurrently(op DDLOp) string {
+	schema, _ := splitQualifiedName(op.Table)
+	if schema != "" {
+		return fmt.Sprintf("DROP INDEX CONCURRENTLY %s.%s;", sql.QuoteIdent(schema), sql.QuoteIdent(op.Name))
+	}
+	return fmt.Sprintf("DROP INDEX CONCURRENTLY %s;", sql.QuoteIdent(op.Name))
+}
+
+func opAddUnique(op DDLOp) string {
+	cols := quoteIdentSlice(op.Columns)
+	return fmt.Sprintf("ALTER TABLE %s ADD CONSTRAINT %s UNIQUE (%s);",
+		quoteQualified(op.Table), sql.QuoteIdent(op.Name), strings.Join(cols, ", "))
+}
+
+func opDropUnique(op DDLOp) string {
+	return fmt.Sprintf("ALTER TABLE %s DROP CONSTRAINT %s;",
+		quoteQualified(op.Table), sql.QuoteIdent(op.Name))
+}
+
+func opAddCheck(op DDLOp) string {
+	return fmt.Sprintf("ALTER TABLE %s ADD CONSTRAINT %s CHECK (%s);",
+		quoteQualified(op.Table), sql.QuoteIdent(op.Name), op.Expr)
+}
+
+func opDropCheck(op DDLOp) string {
+	return fmt.Sprintf("ALTER TABLE %s DROP CONSTRAINT %s;",
+		quoteQualified(op.Table), sql.QuoteIdent(op.Name))
+}
+
+func opCreateEnum(op DDLOp) string {
+	schema := op.Schema
+	name := op.Name
+	if schema == "" {
+		// Try to parse from table field (schema.name).
+		schema, name = splitQualifiedName(op.Table)
+		if name == "" {
+			name = op.Name
+		}
+	}
+	return sql.CreateEnum(schema, name, op.Values, false)
+}
+
+func opAlterEnumAddValue(op DDLOp) string {
+	qualified := quoteQualified(op.Name)
+	if op.Schema != "" {
+		qualified = sql.QualifiedName(op.Schema, op.Name)
+	}
+	var stmts []string
+	for _, v := range op.Values {
+		escaped := strings.ReplaceAll(v, "'", "''")
+		stmts = append(stmts, fmt.Sprintf("ALTER TYPE %s ADD VALUE '%s';", qualified, escaped))
+	}
+	return strings.Join(stmts, "\n")
+}
+
+func opDropEnum(op DDLOp) string {
+	if op.Schema != "" {
+		return fmt.Sprintf("DROP TYPE %s;", sql.QualifiedName(op.Schema, op.Name))
+	}
+	return fmt.Sprintf("DROP TYPE %s;", quoteQualified(op.Name))
+}
+
+func opSetOwner(op DDLOp) string {
+	return fmt.Sprintf("ALTER TABLE %s OWNER TO %s;",
+		quoteQualified(op.Table), sql.QuoteIdent(op.Name))
+}
+
+// splitQualifiedName splits "schema.table" into ("schema", "table").
+// If there's no dot, returns ("public", name).
+func splitQualifiedName(name string) (string, string) {
+	if idx := strings.IndexByte(name, '.'); idx >= 0 {
+		return name[:idx], name[idx+1:]
+	}
+	return "public", name
+}
+
+// quoteQualified quotes a potentially schema-qualified name.
+func quoteQualified(name string) string {
+	schema, table := splitQualifiedName(name)
+	return sql.QualifiedName(schema, table)
+}
+
+// quoteIdentSlice quotes each element as an identifier.
+func quoteIdentSlice(names []string) []string {
+	result := make([]string, len(names))
+	for i, n := range names {
+		result[i] = sql.QuoteIdent(n)
+	}
+	return result
+}
+
+// formatDefault formats a default value for use in DDL.
+func formatDefault(val interface{}, pgType string) string {
+	if val == nil {
+		return "NULL"
+	}
+	switch v := val.(type) {
+	case int64:
+		return fmt.Sprintf("%d", v)
+	case float64:
+		return fmt.Sprintf("%v", v)
+	case bool:
+		if v {
+			return "true"
+		}
+		return "false"
+	case string:
+		return sql.LiteralValue(v, pgType)
+	default:
+		return fmt.Sprintf("'%v'", v)
+	}
+}

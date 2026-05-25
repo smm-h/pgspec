@@ -1,0 +1,772 @@
+package migrate
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/smm-h/pgdesign/internal/diff"
+	"github.com/smm-h/pgdesign/internal/model"
+)
+
+// --- Unit tests (no DB required) ---
+
+func TestGenerateMigration_AddTable(t *testing.T) {
+	desired := &model.Schema{
+		Name: "game",
+		Tables: []model.Table{
+			{
+				Name:   "players",
+				Schema: "game",
+				PK:     []string{"id"},
+				Columns: []model.Column{
+					{Name: "id", PGType: "bigint", NotNull: true},
+					{Name: "name", PGType: "text", NotNull: true},
+				},
+				Comment: "Player accounts",
+			},
+		},
+	}
+
+	d := &diff.SchemaDiff{
+		TablesAdded: []string{"game.players"},
+	}
+
+	m, diags := GenerateMigration(d, desired, "0.1.0")
+	if m == nil {
+		t.Fatal("expected non-nil migration")
+	}
+	if m.Version != "0.1.0" {
+		t.Errorf("version = %q, want %q", m.Version, "0.1.0")
+	}
+
+	// Should have a create_table op.
+	found := false
+	for _, op := range m.DDLOps {
+		if op.Op == "create_table" && op.Table == "game.players" {
+			found = true
+			if op.Down == nil {
+				t.Error("create_table op has no down op")
+			} else if op.Down.Irreversible {
+				t.Error("create_table should be reversible (down = drop_table)")
+			} else if len(op.Down.Ops) == 0 {
+				t.Error("create_table down has no ops")
+			} else if op.Down.Ops[0].Op != "drop_table" {
+				t.Errorf("create_table down op = %q, want drop_table", op.Down.Ops[0].Op)
+			}
+			break
+		}
+	}
+	if !found {
+		t.Error("expected create_table op for game.players")
+	}
+
+	// Diagnostics should not contain errors for create_table (it's safe).
+	for _, d := range diags {
+		if d.Table == "game.players" && d.Code == "MIGRATE_RISK" && strings.Contains(d.Message, "create_table") {
+			t.Errorf("unexpected diagnostic for create_table: %s", d.Message)
+		}
+	}
+}
+
+func TestGenerateMigration_AddColumn(t *testing.T) {
+	desired := &model.Schema{
+		Name: "game",
+		Tables: []model.Table{
+			{
+				Name:   "players",
+				Schema: "game",
+				Columns: []model.Column{
+					{Name: "id", PGType: "bigint", NotNull: true},
+					{Name: "level", PGType: "integer", NotNull: true, Default: "1"},
+				},
+			},
+		},
+	}
+
+	d := &diff.SchemaDiff{
+		TablesChanged: []diff.TableDiff{
+			{
+				Name: "game.players",
+				ColumnsAdded: []model.Column{
+					{Name: "level", PGType: "integer", NotNull: true, Default: "1"},
+				},
+			},
+		},
+	}
+
+	m, _ := GenerateMigration(d, desired, "0.2.0")
+	if m == nil {
+		t.Fatal("expected non-nil migration")
+	}
+
+	found := false
+	for _, op := range m.DDLOps {
+		if op.Op == "add_column" && op.Column == "level" {
+			found = true
+			if op.Type != "integer" {
+				t.Errorf("add_column type = %q, want %q", op.Type, "integer")
+			}
+			if op.Down == nil || len(op.Down.Ops) == 0 {
+				t.Error("add_column has no down ops")
+			} else if op.Down.Ops[0].Op != "drop_column" {
+				t.Errorf("add_column down op = %q, want drop_column", op.Down.Ops[0].Op)
+			}
+			break
+		}
+	}
+	if !found {
+		t.Error("expected add_column op for level")
+	}
+}
+
+func TestGenerateMigration_DropTable(t *testing.T) {
+	desired := &model.Schema{Name: "game"}
+	d := &diff.SchemaDiff{
+		TablesRemoved: []string{"game.old_table"},
+	}
+
+	m, diags := GenerateMigration(d, desired, "0.3.0")
+	if m == nil {
+		t.Fatal("expected non-nil migration")
+	}
+
+	found := false
+	for _, op := range m.DDLOps {
+		if op.Op == "drop_table" && op.Table == "game.old_table" {
+			found = true
+			if op.Down == nil || !op.Down.Irreversible {
+				t.Error("drop_table should have irreversible down")
+			}
+			break
+		}
+	}
+	if !found {
+		t.Error("expected drop_table op for game.old_table")
+	}
+
+	// Should have a dangerous diagnostic.
+	hasDangerous := false
+	for _, d := range diags {
+		if strings.Contains(d.Message, "drop_table") {
+			hasDangerous = true
+			break
+		}
+	}
+	if !hasDangerous {
+		t.Error("expected dangerous diagnostic for drop_table")
+	}
+}
+
+func TestParseMigrationRoundtrip(t *testing.T) {
+	original := &Migration{
+		Description: "Add game_like table and player level",
+		DDLOps: []DDLOp{
+			{
+				Op:      "create_table",
+				Table:   "game.game_like",
+				PK:      []string{"player_id", "game_id"},
+				Comment: "Player likes on games",
+				Down: &DownOp{
+					Ops: []DDLOp{{Op: "drop_table", Table: "game.game_like"}},
+				},
+			},
+			{
+				Op:      "add_column",
+				Table:   "game.players",
+				Column:  "level",
+				Type:    "integer",
+				Default: int64(1),
+				NotNull: true,
+				Down: &DownOp{
+					Ops: []DDLOp{{Op: "drop_column", Table: "game.players", Column: "level"}},
+				},
+			},
+		},
+		DMLOps: []DMLOp{
+			{
+				Op:  "backfill",
+				SQL: "UPDATE game.players SET level = 1 WHERE level IS NULL",
+				Down: &DownOp{
+					Irreversible: true,
+				},
+			},
+		},
+	}
+
+	// Write to temp file.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "0.1.0.toml")
+	if err := WriteMigrationFile(path, original); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	// Read back.
+	parsed, err := ParseMigrationFile(path)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+
+	if parsed.Description != original.Description {
+		t.Errorf("description = %q, want %q", parsed.Description, original.Description)
+	}
+	if len(parsed.DDLOps) != len(original.DDLOps) {
+		t.Fatalf("DDL ops count = %d, want %d", len(parsed.DDLOps), len(original.DDLOps))
+	}
+	if parsed.DDLOps[0].Op != "create_table" {
+		t.Errorf("DDL[0].Op = %q, want create_table", parsed.DDLOps[0].Op)
+	}
+	if parsed.DDLOps[0].Table != "game.game_like" {
+		t.Errorf("DDL[0].Table = %q, want game.game_like", parsed.DDLOps[0].Table)
+	}
+	if parsed.DDLOps[1].Op != "add_column" {
+		t.Errorf("DDL[1].Op = %q, want add_column", parsed.DDLOps[1].Op)
+	}
+	if parsed.DDLOps[1].Column != "level" {
+		t.Errorf("DDL[1].Column = %q, want level", parsed.DDLOps[1].Column)
+	}
+	if !parsed.DDLOps[1].NotNull {
+		t.Error("DDL[1].NotNull should be true")
+	}
+	if len(parsed.DMLOps) != 1 {
+		t.Fatalf("DML ops count = %d, want 1", len(parsed.DMLOps))
+	}
+	if parsed.DMLOps[0].Op != "backfill" {
+		t.Errorf("DML[0].Op = %q, want backfill", parsed.DMLOps[0].Op)
+	}
+	if parsed.DMLOps[0].Down == nil || !parsed.DMLOps[0].Down.Irreversible {
+		t.Error("DML[0] should have irreversible down")
+	}
+}
+
+func TestOpToSQL_CreateTable(t *testing.T) {
+	table := &model.Table{
+		Name:   "players",
+		Schema: "game",
+		PK:     []string{"id"},
+		Columns: []model.Column{
+			{Name: "id", PGType: "bigint", NotNull: true},
+			{Name: "name", PGType: "text", NotNull: true},
+		},
+	}
+	op := DDLOp{
+		Op:       "create_table",
+		Table:    "game.players",
+		TableDef: table,
+	}
+
+	sql := OpToSQL(op)
+	if !strings.Contains(sql, "CREATE TABLE") {
+		t.Errorf("expected CREATE TABLE, got: %s", sql)
+	}
+	if !strings.Contains(sql, "game") {
+		t.Errorf("expected schema name, got: %s", sql)
+	}
+	if !strings.Contains(sql, "players") {
+		t.Errorf("expected table name, got: %s", sql)
+	}
+}
+
+func TestOpToSQL_AddColumn(t *testing.T) {
+	op := DDLOp{
+		Op:      "add_column",
+		Table:   "game.players",
+		Column:  "level",
+		Type:    "integer",
+		Default: int64(1),
+		NotNull: true,
+	}
+
+	sql := OpToSQL(op)
+	if !strings.Contains(sql, "ALTER TABLE") {
+		t.Errorf("expected ALTER TABLE, got: %s", sql)
+	}
+	if !strings.Contains(sql, "ADD COLUMN") {
+		t.Errorf("expected ADD COLUMN, got: %s", sql)
+	}
+	if !strings.Contains(sql, "NOT NULL") {
+		t.Errorf("expected NOT NULL, got: %s", sql)
+	}
+	if !strings.Contains(sql, "DEFAULT 1") {
+		t.Errorf("expected DEFAULT 1, got: %s", sql)
+	}
+}
+
+func TestOpToSQL_AddFK(t *testing.T) {
+	op := DDLOp{
+		Op:       "add_fk",
+		Table:    "game.scores",
+		Name:     "fk_scores_player",
+		Columns:  []string{"player_id"},
+		RefTable: "game.players",
+		RefCols:  []string{"id"},
+		OnDelete: "CASCADE",
+	}
+
+	sql := OpToSQL(op)
+	if !strings.Contains(sql, "FOREIGN KEY") {
+		t.Errorf("expected FOREIGN KEY, got: %s", sql)
+	}
+	if !strings.Contains(sql, "REFERENCES") {
+		t.Errorf("expected REFERENCES, got: %s", sql)
+	}
+	if !strings.Contains(sql, "ON DELETE CASCADE") {
+		t.Errorf("expected ON DELETE CASCADE, got: %s", sql)
+	}
+}
+
+func TestOpToSQL_DropTable(t *testing.T) {
+	op := DDLOp{
+		Op:    "drop_table",
+		Table: "game.old_table",
+	}
+	sql := OpToSQL(op)
+	if sql != `DROP TABLE game.old_table;` {
+		t.Errorf("unexpected SQL: %s", sql)
+	}
+}
+
+func TestOpToSQL_CreateIndex(t *testing.T) {
+	op := DDLOp{
+		Op:      "create_index",
+		Table:   "game.players",
+		Name:    "idx_players_name",
+		Columns: []string{"name"},
+	}
+	sql := OpToSQL(op)
+	if !strings.Contains(sql, "CREATE INDEX") {
+		t.Errorf("expected CREATE INDEX, got: %s", sql)
+	}
+	if !strings.Contains(sql, "idx_players_name") {
+		t.Errorf("expected index name, got: %s", sql)
+	}
+}
+
+func TestOpToSQL_CreateIndexConcurrently(t *testing.T) {
+	op := DDLOp{
+		Op:      "create_index_concurrently",
+		Table:   "game.players",
+		Name:    "idx_players_name",
+		Columns: []string{"name"},
+	}
+	sql := OpToSQL(op)
+	if !strings.Contains(sql, "CREATE INDEX CONCURRENTLY") {
+		t.Errorf("expected CREATE INDEX CONCURRENTLY, got: %s", sql)
+	}
+}
+
+func TestIsNonTransactional(t *testing.T) {
+	tests := []struct {
+		op   string
+		want bool
+	}{
+		{"create_index_concurrently", true},
+		{"drop_index_concurrently", true},
+		{"alter_enum_add_value", true},
+		{"create_table", false},
+		{"add_column", false},
+		{"create_index", false},
+	}
+	for _, tt := range tests {
+		got := IsNonTransactional(DDLOp{Op: tt.op})
+		if got != tt.want {
+			t.Errorf("IsNonTransactional(%q) = %v, want %v", tt.op, got, tt.want)
+		}
+	}
+}
+
+func TestSemverCompare(t *testing.T) {
+	tests := []struct {
+		a, b string
+		want int
+	}{
+		{"0.1.0", "0.2.0", -1},
+		{"0.2.0", "0.1.0", 1},
+		{"1.0.0", "1.0.0", 0},
+		{"0.1.0", "0.1.1", -1},
+		{"1.0.0", "0.9.9", 1},
+		{"0.10.0", "0.9.0", 1},
+	}
+	for _, tt := range tests {
+		got := compareSemver(tt.a, tt.b)
+		if got != tt.want {
+			t.Errorf("compareSemver(%q, %q) = %d, want %d", tt.a, tt.b, got, tt.want)
+		}
+	}
+}
+
+func TestSplitQualifiedName(t *testing.T) {
+	tests := []struct {
+		input      string
+		wantSchema string
+		wantName   string
+	}{
+		{"game.players", "game", "players"},
+		{"players", "public", "players"},
+		{"my_schema.my_table", "my_schema", "my_table"},
+	}
+	for _, tt := range tests {
+		schema, name := splitQualifiedName(tt.input)
+		if schema != tt.wantSchema || name != tt.wantName {
+			t.Errorf("splitQualifiedName(%q) = (%q, %q), want (%q, %q)",
+				tt.input, schema, name, tt.wantSchema, tt.wantName)
+		}
+	}
+}
+
+func TestCheckReversibility(t *testing.T) {
+	// Reversible migration.
+	m := &Migration{
+		DDLOps: []DDLOp{
+			{
+				Op:    "create_table",
+				Table: "game.players",
+				Down:  &DownOp{Ops: []DDLOp{{Op: "drop_table", Table: "game.players"}}},
+			},
+		},
+	}
+	if err := checkReversibility(m); err != nil {
+		t.Errorf("expected reversible, got: %v", err)
+	}
+
+	// Irreversible migration.
+	m.DDLOps = append(m.DDLOps, DDLOp{
+		Op:    "drop_table",
+		Table: "game.old_table",
+		Down:  &DownOp{Irreversible: true},
+	})
+	if err := checkReversibility(m); err == nil {
+		t.Error("expected irreversible error")
+	}
+}
+
+func TestDiscoverMigrations(t *testing.T) {
+	dir := t.TempDir()
+
+	// Create some migration files.
+	for _, v := range []string{"0.1.0", "0.3.0", "0.2.0"} {
+		content := fmt.Sprintf("description = %q\n", "Migration "+v)
+		if err := os.WriteFile(filepath.Join(dir, v+".toml"), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Create a non-migration file (should be skipped).
+	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("# Migrations\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	files, err := discoverMigrations(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 3 {
+		t.Fatalf("found %d migrations, want 3", len(files))
+	}
+	// Should be sorted by semver.
+	if files[0].version != "0.1.0" {
+		t.Errorf("files[0].version = %q, want 0.1.0", files[0].version)
+	}
+	if files[1].version != "0.2.0" {
+		t.Errorf("files[1].version = %q, want 0.2.0", files[1].version)
+	}
+	if files[2].version != "0.3.0" {
+		t.Errorf("files[2].version = %q, want 0.3.0", files[2].version)
+	}
+}
+
+func TestParseMigrationFromDesignExample(t *testing.T) {
+	// Parse the example from DESIGN.md.
+	input := `description = "Add game_like table and player level"
+
+[[ddl]]
+op = "create_table"
+table = "game.game_like"
+pk = ["player_id", "game_id"]
+comment = "Player likes on games"
+down = { op = "drop_table", table = "game.game_like" }
+
+[[ddl]]
+op = "add_column"
+table = "game.players"
+column = "level"
+type = "integer"
+default = 1
+not_null = true
+down = { op = "drop_column", table = "game.players", column = "level" }
+
+[[ddl]]
+op = "create_index_concurrently"
+table = "game.game_like"
+name = "idx_game_like_game_id"
+columns = ["game_id"]
+down = { op = "drop_index_concurrently", name = "idx_game_like_game_id" }
+
+[[dml]]
+op = "backfill"
+sql = "UPDATE game.players SET level = 1 WHERE level IS NULL"
+down = { irreversible = true }
+`
+
+	m, err := ParseMigration(input)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+
+	if m.Description != "Add game_like table and player level" {
+		t.Errorf("description = %q", m.Description)
+	}
+	if len(m.DDLOps) != 3 {
+		t.Fatalf("DDL ops = %d, want 3", len(m.DDLOps))
+	}
+
+	// Op 0: create_table
+	if m.DDLOps[0].Op != "create_table" {
+		t.Errorf("DDL[0].Op = %q", m.DDLOps[0].Op)
+	}
+	if m.DDLOps[0].Table != "game.game_like" {
+		t.Errorf("DDL[0].Table = %q", m.DDLOps[0].Table)
+	}
+	if m.DDLOps[0].Down == nil || len(m.DDLOps[0].Down.Ops) == 0 {
+		t.Error("DDL[0] has no down ops")
+	} else if m.DDLOps[0].Down.Ops[0].Op != "drop_table" {
+		t.Errorf("DDL[0].Down.Ops[0].Op = %q", m.DDLOps[0].Down.Ops[0].Op)
+	}
+
+	// Op 1: add_column
+	if m.DDLOps[1].Op != "add_column" {
+		t.Errorf("DDL[1].Op = %q", m.DDLOps[1].Op)
+	}
+	if m.DDLOps[1].Column != "level" {
+		t.Errorf("DDL[1].Column = %q", m.DDLOps[1].Column)
+	}
+	if !m.DDLOps[1].NotNull {
+		t.Error("DDL[1].NotNull should be true")
+	}
+
+	// Op 2: create_index_concurrently
+	if m.DDLOps[2].Op != "create_index_concurrently" {
+		t.Errorf("DDL[2].Op = %q", m.DDLOps[2].Op)
+	}
+
+	// DML
+	if len(m.DMLOps) != 1 {
+		t.Fatalf("DML ops = %d, want 1", len(m.DMLOps))
+	}
+	if m.DMLOps[0].Op != "backfill" {
+		t.Errorf("DML[0].Op = %q", m.DMLOps[0].Op)
+	}
+	if m.DMLOps[0].Down == nil || !m.DMLOps[0].Down.Irreversible {
+		t.Error("DML[0] should have irreversible down")
+	}
+}
+
+// --- Integration tests (require local PostgreSQL) ---
+
+func getTestConnStr() string {
+	connStr := os.Getenv("PGDESIGN_TEST_DB")
+	if connStr == "" {
+		connStr = "postgres://localhost:5432/pgdesign_test?sslmode=disable"
+	}
+	return connStr
+}
+
+func connectTestDB(t *testing.T) *pgx.Conn {
+	t.Helper()
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, getTestConnStr())
+	if err != nil {
+		t.Skipf("Skipping integration test: cannot connect to PostgreSQL: %v", err)
+	}
+	return conn
+}
+
+func TestIntegration_StateTracking(t *testing.T) {
+	conn := connectTestDB(t)
+	ctx := context.Background()
+	defer conn.Close(ctx)
+
+	// Clean up before test.
+	conn.Exec(ctx, "DROP TABLE IF EXISTS pgdesign_migrations")
+
+	// Ensure table.
+	if err := EnsureMigrationsTable(ctx, conn); err != nil {
+		t.Fatalf("ensure: %v", err)
+	}
+
+	// Record a migration.
+	if err := RecordMigration(ctx, conn, "0.1.0", "abc123", "Initial migration"); err != nil {
+		t.Fatalf("record: %v", err)
+	}
+
+	// Query applied versions.
+	versions, err := AppliedVersions(ctx, conn)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if len(versions) != 1 || versions[0] != "0.1.0" {
+		t.Errorf("versions = %v, want [0.1.0]", versions)
+	}
+
+	// Record another.
+	if err := RecordMigration(ctx, conn, "0.2.0", "def456", "Second migration"); err != nil {
+		t.Fatalf("record: %v", err)
+	}
+	versions, err = AppliedVersions(ctx, conn)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if len(versions) != 2 {
+		t.Fatalf("versions count = %d, want 2", len(versions))
+	}
+	if versions[0] != "0.1.0" || versions[1] != "0.2.0" {
+		t.Errorf("versions = %v, want [0.1.0, 0.2.0]", versions)
+	}
+
+	// Remove a migration.
+	if err := RemoveMigration(ctx, conn, "0.2.0"); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	versions, err = AppliedVersions(ctx, conn)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if len(versions) != 1 || versions[0] != "0.1.0" {
+		t.Errorf("versions = %v, want [0.1.0]", versions)
+	}
+
+	// Clean up.
+	conn.Exec(ctx, "DROP TABLE pgdesign_migrations")
+}
+
+func TestIntegration_AdvisoryLock(t *testing.T) {
+	conn := connectTestDB(t)
+	ctx := context.Background()
+	defer conn.Close(ctx)
+
+	acquired, err := AcquireAdvisoryLock(ctx, conn)
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	if !acquired {
+		t.Error("expected lock to be acquired")
+	}
+
+	// Release.
+	if err := ReleaseAdvisoryLock(ctx, conn); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+}
+
+func TestIntegration_ApplyAndRollback(t *testing.T) {
+	conn := connectTestDB(t)
+	ctx := context.Background()
+	defer conn.Close(ctx)
+
+	// Clean up.
+	conn.Exec(ctx, "DROP TABLE IF EXISTS pgdesign_test_table")
+	conn.Exec(ctx, "DROP TABLE IF EXISTS pgdesign_migrations")
+
+	// Create a migrations directory with one migration.
+	dir := t.TempDir()
+	migration := `description = "Create test table"
+
+[[ddl]]
+op = "create_table"
+table = "public.pgdesign_test_table"
+down = { op = "drop_table", table = "public.pgdesign_test_table" }
+`
+	if err := os.WriteFile(filepath.Join(dir, "0.1.0.toml"), []byte(migration), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Apply.
+	applied, err := Apply(ctx, conn, dir)
+	if err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if len(applied) != 1 || applied[0] != "0.1.0" {
+		t.Errorf("applied = %v, want [0.1.0]", applied)
+	}
+
+	// Verify table exists (the create_table op without TableDef just does
+	// CREATE TABLE schema.name () which creates an empty table).
+	var exists bool
+	err = conn.QueryRow(ctx,
+		"SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'pgdesign_test_table')").Scan(&exists)
+	if err != nil {
+		t.Fatalf("check table: %v", err)
+	}
+	if !exists {
+		t.Error("expected pgdesign_test_table to exist after apply")
+	}
+
+	// Rollback.
+	rolledBack, err := Rollback(ctx, conn, dir)
+	if err != nil {
+		t.Fatalf("rollback: %v", err)
+	}
+	if rolledBack != "0.1.0" {
+		t.Errorf("rolled back = %q, want 0.1.0", rolledBack)
+	}
+
+	// Verify table gone.
+	err = conn.QueryRow(ctx,
+		"SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'pgdesign_test_table')").Scan(&exists)
+	if err != nil {
+		t.Fatalf("check table: %v", err)
+	}
+	if exists {
+		t.Error("expected pgdesign_test_table to be gone after rollback")
+	}
+
+	// Clean up.
+	conn.Exec(ctx, "DROP TABLE IF EXISTS pgdesign_migrations")
+}
+
+func TestIntegration_ApplyIdempotent(t *testing.T) {
+	conn := connectTestDB(t)
+	ctx := context.Background()
+	defer conn.Close(ctx)
+
+	// Clean up.
+	conn.Exec(ctx, "DROP TABLE IF EXISTS pgdesign_test_table2")
+	conn.Exec(ctx, "DROP TABLE IF EXISTS pgdesign_migrations")
+
+	dir := t.TempDir()
+	migration := `description = "Create test table 2"
+
+[[ddl]]
+op = "create_table"
+table = "public.pgdesign_test_table2"
+down = { op = "drop_table", table = "public.pgdesign_test_table2" }
+`
+	if err := os.WriteFile(filepath.Join(dir, "0.1.0.toml"), []byte(migration), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Apply twice.
+	applied1, err := Apply(ctx, conn, dir)
+	if err != nil {
+		t.Fatalf("apply 1: %v", err)
+	}
+	if len(applied1) != 1 {
+		t.Errorf("apply 1: applied = %v, want [0.1.0]", applied1)
+	}
+
+	applied2, err := Apply(ctx, conn, dir)
+	if err != nil {
+		t.Fatalf("apply 2: %v", err)
+	}
+	if len(applied2) != 0 {
+		t.Errorf("apply 2: applied = %v, want []", applied2)
+	}
+
+	// Clean up.
+	conn.Exec(ctx, "DROP TABLE IF EXISTS pgdesign_test_table2")
+	conn.Exec(ctx, "DROP TABLE IF EXISTS pgdesign_migrations")
+}
