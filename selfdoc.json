@@ -1,5 +1,5 @@
 {
-  "version": "0.1.2",
+  "version": "0.2.1",
   "base_url": "https://pgdesign.smmh.dev",
   "root_files": ["docs/_CLAUDE.md", "docs/_README.md"],
   "language": "go",
@@ -24,7 +24,7 @@
   ],
   "docs": "docs/",
   "output": "docs/_build/",
-  "versions": [{"version": "0.1.2", "indexed": true}],
+  "versions": [{"version": "0.2.1", "indexed": true}],
   "locales": [{"code": "en", "label": "English", "default": true}],
   "deploy": {
     "provider": "cloudflare-pages",
