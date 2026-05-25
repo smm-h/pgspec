@@ -10,6 +10,7 @@ import (
 	"github.com/smm-h/pgdesign/internal/extregistry"
 	"github.com/smm-h/pgdesign/internal/format"
 	"github.com/smm-h/pgdesign/internal/generate"
+	"github.com/smm-h/pgdesign/internal/introspect"
 	"github.com/smm-h/pgdesign/internal/model"
 	"github.com/smm-h/pgdesign/internal/parse"
 	"github.com/smm-h/pgdesign/internal/semtype"
@@ -52,7 +53,12 @@ func main() {
 		),
 	)
 
-	app.Command("introspect", "Introspect a live PostgreSQL database", notImplemented)
+	app.Command("introspect", "Introspect a live PostgreSQL database", handleIntrospect,
+		strictcli.WithFlags(
+			strictcli.StringFlag("schema", "Schema name to introspect", strictcli.Repeatable()),
+			strictcli.StringFlag("output", "Output file path (default: stdout)", strictcli.Default(nil)),
+		),
+	)
 
 	app.Command("diff", "Diff a schema file against a live database", notImplemented,
 		strictcli.WithArgs(strictcli.NewArg("file", "Path to schema file")),
@@ -275,6 +281,59 @@ func handleFmt(kwargs map[string]interface{}) int {
 		fmt.Fprintf(os.Stderr, "error: cannot write file: %v\n", err)
 		return 1
 	}
+	return 0
+}
+
+func handleIntrospect(kwargs map[string]interface{}) int {
+	dbURL, _ := kwargs["db"].(string)
+	if dbURL == "" {
+		fmt.Fprintln(os.Stderr, "error: --db is required for introspect")
+		return 1
+	}
+
+	// Collect schema names from repeatable --schema flag.
+	var schemaNames []string
+	if raw, ok := kwargs["schema"].([]interface{}); ok {
+		for _, v := range raw {
+			if s, ok := v.(string); ok {
+				schemaNames = append(schemaNames, s)
+			}
+		}
+	}
+	if len(schemaNames) == 0 {
+		schemaNames = []string{"public"}
+	}
+
+	schema, diags, err := introspect.Introspect(dbURL, schemaNames)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		return 1
+	}
+
+	// Print diagnostics (warnings/info) to stderr.
+	if len(diags) > 0 {
+		fmt.Fprint(os.Stderr, diagnostic.RenderTerminal(diags, true))
+	}
+	if diagnostic.Diagnostics(diags).HasErrors() {
+		return 1
+	}
+
+	data, err := introspect.Export(schema)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: export failed: %v\n", err)
+		return 1
+	}
+
+	// Write to file or stdout.
+	if outputPath, ok := kwargs["output"].(string); ok && outputPath != "" {
+		if err := os.WriteFile(outputPath, data, 0o644); err != nil {
+			fmt.Fprintf(os.Stderr, "error: cannot write output file: %v\n", err)
+			return 1
+		}
+	} else {
+		fmt.Print(string(data))
+	}
+
 	return 0
 }
 

@@ -1,0 +1,496 @@
+package introspect
+
+import (
+	"context"
+	"os"
+	"strings"
+	"testing"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/smm-h/pgdesign/internal/model"
+)
+
+const testConnStr = "postgres:///pgdesign_test"
+const testSchema = "pgdesign_test"
+
+// canConnect checks if we can connect to local PostgreSQL.
+// canSetup connects to the test database and verifies that we can create
+// schemas. Returns a connected pgx.Conn on success, or nil if the test
+// database is unavailable (tests should be skipped).
+func canSetup() *pgx.Conn {
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, testConnStr)
+	if err != nil {
+		return nil
+	}
+	// Verify we have CREATE privilege by attempting a probe schema.
+	_, err = conn.Exec(ctx, "CREATE SCHEMA IF NOT EXISTS pgdesign_probe_test")
+	if err != nil {
+		conn.Close(ctx)
+		return nil
+	}
+	conn.Exec(ctx, "DROP SCHEMA IF EXISTS pgdesign_probe_test")
+	return conn
+}
+
+func TestMain(m *testing.M) {
+	conn := canSetup()
+	if conn == nil {
+		// Skip all tests if PG is not available or lacks permissions.
+		os.Exit(0)
+	}
+
+	ctx := context.Background()
+
+	// Clean up any previous test schema.
+	conn.Exec(ctx, "DROP SCHEMA IF EXISTS "+testSchema+" CASCADE")
+
+	setupSQL := `
+		CREATE SCHEMA ` + testSchema + `;
+
+		CREATE TYPE ` + testSchema + `.status AS ENUM ('active', 'inactive', 'banned');
+		COMMENT ON TYPE ` + testSchema + `.status IS 'User account status';
+
+		CREATE TABLE ` + testSchema + `.users (
+			id bigserial PRIMARY KEY,
+			name text NOT NULL,
+			email text NOT NULL,
+			status ` + testSchema + `.status NOT NULL DEFAULT 'active',
+			bio text,
+			created_at timestamptz NOT NULL DEFAULT now()
+		);
+		COMMENT ON TABLE ` + testSchema + `.users IS 'User accounts';
+		COMMENT ON COLUMN ` + testSchema + `.users.name IS 'Full name';
+		COMMENT ON COLUMN ` + testSchema + `.users.email IS 'Email address';
+
+		ALTER TABLE ` + testSchema + `.users
+			ADD CONSTRAINT uq_users_email UNIQUE (email);
+
+		ALTER TABLE ` + testSchema + `.users
+			ADD CONSTRAINT ck_users_name_not_empty CHECK (length(name) > 0);
+
+		CREATE INDEX idx_users_status ON ` + testSchema + `.users (status);
+		CREATE INDEX idx_users_email_lower ON ` + testSchema + `.users (lower(email));
+
+		CREATE TABLE ` + testSchema + `.posts (
+			id bigserial PRIMARY KEY,
+			author_id bigint NOT NULL,
+			title text NOT NULL,
+			body text,
+			published boolean NOT NULL DEFAULT false,
+			created_at timestamptz NOT NULL DEFAULT now()
+		);
+		COMMENT ON TABLE ` + testSchema + `.posts IS 'Blog posts';
+
+		ALTER TABLE ` + testSchema + `.posts
+			ADD CONSTRAINT fk_posts_author
+			FOREIGN KEY (author_id) REFERENCES ` + testSchema + `.users(id) ON DELETE CASCADE;
+
+		CREATE INDEX idx_posts_author ON ` + testSchema + `.posts (author_id);
+
+		ALTER TABLE ` + testSchema + `.posts
+			ADD CONSTRAINT ck_posts_title_not_empty CHECK (length(title) > 0);
+	`
+
+	_, execErr := conn.Exec(ctx, setupSQL)
+	if execErr != nil {
+		conn.Close(ctx)
+		panic("test setup failed: " + execErr.Error())
+	}
+	conn.Close(ctx)
+
+	// Run tests.
+	code := m.Run()
+
+	// Teardown: drop test schema.
+	conn2, connErr := pgx.Connect(ctx, testConnStr)
+	if connErr == nil {
+		conn2.Exec(ctx, "DROP SCHEMA IF EXISTS "+testSchema+" CASCADE")
+		conn2.Close(ctx)
+	}
+
+	os.Exit(code)
+}
+
+func TestIntrospectTables(t *testing.T) {
+	schema, diags, err := Introspect(testConnStr, []string{testSchema})
+	if err != nil {
+		t.Fatalf("Introspect failed: %v", err)
+	}
+	_ = diags
+
+	if schema.PGVersion < 10 {
+		t.Errorf("PGVersion = %d, expected >= 10", schema.PGVersion)
+	}
+
+	if schema.Name != testSchema {
+		t.Errorf("Name = %q, want %q", schema.Name, testSchema)
+	}
+
+	// Expect 2 tables.
+	if len(schema.Tables) != 2 {
+		t.Fatalf("len(Tables) = %d, want 2", len(schema.Tables))
+	}
+
+	// Tables are ordered alphabetically.
+	if schema.Tables[0].Name != "posts" {
+		t.Errorf("Tables[0].Name = %q, want %q", schema.Tables[0].Name, "posts")
+	}
+	if schema.Tables[1].Name != "users" {
+		t.Errorf("Tables[1].Name = %q, want %q", schema.Tables[1].Name, "users")
+	}
+}
+
+func TestIntrospectColumns(t *testing.T) {
+	schema, _, err := Introspect(testConnStr, []string{testSchema})
+	if err != nil {
+		t.Fatalf("Introspect failed: %v", err)
+	}
+
+	users := findTable(schema.Tables, "users")
+	if users == nil {
+		t.Fatal("users table not found")
+	}
+
+	// Users should have 6 columns in attnum order.
+	if len(users.Columns) != 6 {
+		t.Fatalf("users columns = %d, want 6", len(users.Columns))
+	}
+
+	// Check column names in order.
+	expectedCols := []string{"id", "name", "email", "status", "bio", "created_at"}
+	for i, want := range expectedCols {
+		if users.Columns[i].Name != want {
+			t.Errorf("users.Columns[%d].Name = %q, want %q", i, users.Columns[i].Name, want)
+		}
+	}
+
+	// Check specific column properties.
+	nameCol := users.Columns[1]
+	if nameCol.PGType != "text" {
+		t.Errorf("name.PGType = %q, want %q", nameCol.PGType, "text")
+	}
+	if !nameCol.NotNull {
+		t.Error("name.NotNull = false, want true")
+	}
+	if nameCol.Comment != "Full name" {
+		t.Errorf("name.Comment = %q, want %q", nameCol.Comment, "Full name")
+	}
+
+	// bio is nullable.
+	bioCol := users.Columns[4]
+	if bioCol.NotNull {
+		t.Error("bio.NotNull = true, want false")
+	}
+
+	// created_at has a default.
+	createdCol := users.Columns[5]
+	if createdCol.DefaultExpr != "now()" {
+		t.Errorf("created_at.DefaultExpr = %q, want %q", createdCol.DefaultExpr, "now()")
+	}
+}
+
+func TestIntrospectPrimaryKey(t *testing.T) {
+	schema, _, err := Introspect(testConnStr, []string{testSchema})
+	if err != nil {
+		t.Fatalf("Introspect failed: %v", err)
+	}
+
+	users := findTable(schema.Tables, "users")
+	if users == nil {
+		t.Fatal("users table not found")
+	}
+
+	if len(users.PK) != 1 || users.PK[0] != "id" {
+		t.Errorf("users.PK = %v, want [id]", users.PK)
+	}
+}
+
+func TestIntrospectForeignKeys(t *testing.T) {
+	schema, _, err := Introspect(testConnStr, []string{testSchema})
+	if err != nil {
+		t.Fatalf("Introspect failed: %v", err)
+	}
+
+	posts := findTable(schema.Tables, "posts")
+	if posts == nil {
+		t.Fatal("posts table not found")
+	}
+
+	if len(posts.FKs) != 1 {
+		t.Fatalf("posts.FKs = %d, want 1", len(posts.FKs))
+	}
+
+	fk := posts.FKs[0]
+	if fk.Name != "fk_posts_author" {
+		t.Errorf("FK.Name = %q, want %q", fk.Name, "fk_posts_author")
+	}
+	if len(fk.Columns) != 1 || fk.Columns[0] != "author_id" {
+		t.Errorf("FK.Columns = %v, want [author_id]", fk.Columns)
+	}
+	if fk.RefTable != "users" {
+		t.Errorf("FK.RefTable = %q, want %q", fk.RefTable, "users")
+	}
+	if len(fk.RefColumns) != 1 || fk.RefColumns[0] != "id" {
+		t.Errorf("FK.RefColumns = %v, want [id]", fk.RefColumns)
+	}
+	if fk.OnDelete != "CASCADE" {
+		t.Errorf("FK.OnDelete = %q, want %q", fk.OnDelete, "CASCADE")
+	}
+	if fk.RefSchema != testSchema {
+		t.Errorf("FK.RefSchema = %q, want %q", fk.RefSchema, testSchema)
+	}
+}
+
+func TestIntrospectIndexes(t *testing.T) {
+	schema, _, err := Introspect(testConnStr, []string{testSchema})
+	if err != nil {
+		t.Fatalf("Introspect failed: %v", err)
+	}
+
+	users := findTable(schema.Tables, "users")
+	if users == nil {
+		t.Fatal("users table not found")
+	}
+
+	// Users should have 2 explicit indexes (idx_users_status, idx_users_email_lower).
+	// The unique constraint index is reported under Uniques, not here.
+	if len(users.Indexes) < 2 {
+		t.Fatalf("users.Indexes = %d, want >= 2", len(users.Indexes))
+	}
+
+	// Find idx_users_status.
+	var statusIdx *indexInfo
+	for _, idx := range users.Indexes {
+		if idx.Name == "idx_users_status" {
+			statusIdx = &indexInfo{idx.Name, idx.Columns, idx.Method}
+			break
+		}
+	}
+	if statusIdx == nil {
+		t.Error("idx_users_status not found in indexes")
+	} else {
+		if len(statusIdx.columns) != 1 || statusIdx.columns[0] != "status" {
+			t.Errorf("idx_users_status.Columns = %v, want [status]", statusIdx.columns)
+		}
+	}
+}
+
+type indexInfo struct {
+	name    string
+	columns []string
+	method  string
+}
+
+func TestIntrospectUniqueConstraints(t *testing.T) {
+	schema, _, err := Introspect(testConnStr, []string{testSchema})
+	if err != nil {
+		t.Fatalf("Introspect failed: %v", err)
+	}
+
+	users := findTable(schema.Tables, "users")
+	if users == nil {
+		t.Fatal("users table not found")
+	}
+
+	if len(users.Uniques) != 1 {
+		t.Fatalf("users.Uniques = %d, want 1", len(users.Uniques))
+	}
+
+	uq := users.Uniques[0]
+	if uq.Name != "uq_users_email" {
+		t.Errorf("Unique.Name = %q, want %q", uq.Name, "uq_users_email")
+	}
+	if len(uq.Columns) != 1 || uq.Columns[0] != "email" {
+		t.Errorf("Unique.Columns = %v, want [email]", uq.Columns)
+	}
+}
+
+func TestIntrospectCheckConstraints(t *testing.T) {
+	schema, _, err := Introspect(testConnStr, []string{testSchema})
+	if err != nil {
+		t.Fatalf("Introspect failed: %v", err)
+	}
+
+	users := findTable(schema.Tables, "users")
+	if users == nil {
+		t.Fatal("users table not found")
+	}
+
+	if len(users.Checks) != 1 {
+		t.Fatalf("users.Checks = %d, want 1", len(users.Checks))
+	}
+
+	ck := users.Checks[0]
+	if ck.Name != "ck_users_name_not_empty" {
+		t.Errorf("Check.Name = %q, want %q", ck.Name, "ck_users_name_not_empty")
+	}
+	// pg_get_constraintdef may wrap the expression; we strip CHECK (...).
+	if ck.Expr == "" {
+		t.Error("Check.Expr is empty")
+	}
+}
+
+func TestIntrospectEnums(t *testing.T) {
+	schema, _, err := Introspect(testConnStr, []string{testSchema})
+	if err != nil {
+		t.Fatalf("Introspect failed: %v", err)
+	}
+
+	if len(schema.Enums) != 1 {
+		t.Fatalf("len(Enums) = %d, want 1", len(schema.Enums))
+	}
+
+	e := schema.Enums[0]
+	if e.Name != "status" {
+		t.Errorf("Enum.Name = %q, want %q", e.Name, "status")
+	}
+	if e.Schema != testSchema {
+		t.Errorf("Enum.Schema = %q, want %q", e.Schema, testSchema)
+	}
+	if len(e.Values) != 3 || e.Values[0] != "active" || e.Values[1] != "inactive" || e.Values[2] != "banned" {
+		t.Errorf("Enum.Values = %v, want [active inactive banned]", e.Values)
+	}
+	if e.Comment != "User account status" {
+		t.Errorf("Enum.Comment = %q, want %q", e.Comment, "User account status")
+	}
+}
+
+func TestIntrospectTableComment(t *testing.T) {
+	schema, _, err := Introspect(testConnStr, []string{testSchema})
+	if err != nil {
+		t.Fatalf("Introspect failed: %v", err)
+	}
+
+	users := findTable(schema.Tables, "users")
+	if users == nil {
+		t.Fatal("users table not found")
+	}
+	if users.Comment != "User accounts" {
+		t.Errorf("users.Comment = %q, want %q", users.Comment, "User accounts")
+	}
+}
+
+func TestExport(t *testing.T) {
+	schema, _, err := Introspect(testConnStr, []string{testSchema})
+	if err != nil {
+		t.Fatalf("Introspect failed: %v", err)
+	}
+
+	data, err := Export(schema)
+	if err != nil {
+		t.Fatalf("Export failed: %v", err)
+	}
+
+	toml := string(data)
+
+	// Basic structure checks.
+	if !containsStr(toml, "[meta]") {
+		t.Error("export missing [meta]")
+	}
+	if !containsStr(toml, "schema = \""+testSchema+"\"") {
+		t.Error("export missing schema name")
+	}
+	if !containsStr(toml, "[types.status]") {
+		t.Error("export missing enum type")
+	}
+	if !containsStr(toml, "[tables.users]") {
+		t.Error("export missing users table")
+	}
+	if !containsStr(toml, "[tables.posts]") {
+		t.Error("export missing posts table")
+	}
+	if !containsStr(toml, "[tables.users.columns.id]") {
+		t.Error("export missing users.id column")
+	}
+	if !containsStr(toml, "[tables.posts.fks.fk_posts_author]") {
+		t.Error("export missing posts FK")
+	}
+}
+
+func TestParseIndexDef(t *testing.T) {
+	tests := []struct {
+		name    string
+		def     string
+		cols    []string
+		where   string
+		include []string
+		opclass string
+	}{
+		{
+			name: "simple btree",
+			def:  `CREATE INDEX idx_users_status ON pgdesign_test.users USING btree (status)`,
+			cols: []string{"status"},
+		},
+		{
+			name: "expression index",
+			def:  `CREATE INDEX idx_users_email_lower ON pgdesign_test.users USING btree (lower(email))`,
+			cols: []string{"lower(email)"},
+		},
+		{
+			name:  "partial index",
+			def:   `CREATE INDEX idx_active ON myschema.users USING btree (created_at) WHERE (status = 'active')`,
+			cols:  []string{"created_at"},
+			where: "(status = 'active')",
+		},
+		{
+			name:    "with include",
+			def:     `CREATE INDEX idx_covering ON myschema.orders USING btree (customer_id) INCLUDE (total, created_at)`,
+			cols:    []string{"customer_id"},
+			include: []string{"total", "created_at"},
+		},
+		{
+			name:    "with opclass",
+			def:     `CREATE INDEX idx_pattern ON myschema.users USING btree (email varchar_pattern_ops)`,
+			cols:    []string{"email"},
+			opclass: "varchar_pattern_ops",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := parseIndexDef(tt.def)
+
+			if len(p.columns) != len(tt.cols) {
+				t.Fatalf("columns = %v, want %v", p.columns, tt.cols)
+			}
+			for i := range tt.cols {
+				if p.columns[i] != tt.cols[i] {
+					t.Errorf("columns[%d] = %q, want %q", i, p.columns[i], tt.cols[i])
+				}
+			}
+
+			if p.where != tt.where {
+				t.Errorf("where = %q, want %q", p.where, tt.where)
+			}
+
+			if len(p.include) != len(tt.include) {
+				t.Fatalf("include = %v, want %v", p.include, tt.include)
+			}
+			for i := range tt.include {
+				if p.include[i] != tt.include[i] {
+					t.Errorf("include[%d] = %q, want %q", i, p.include[i], tt.include[i])
+				}
+			}
+
+			if p.opclass != tt.opclass {
+				t.Errorf("opclass = %q, want %q", p.opclass, tt.opclass)
+			}
+		})
+	}
+}
+
+// findTable looks up a table by name in a slice.
+func findTable(tables []model.Table, name string) *model.Table {
+	for i := range tables {
+		if tables[i].Name == name {
+			return &tables[i]
+		}
+	}
+	return nil
+}
+
+// containsStr checks if s contains substr.
+func containsStr(s, substr string) bool {
+	return len(s) > 0 && len(substr) > 0 && strings.Contains(s, substr)
+}
