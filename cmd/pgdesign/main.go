@@ -11,6 +11,7 @@ import (
 	"github.com/smm-h/pgdesign/internal/audit"
 	"github.com/smm-h/pgdesign/internal/diagnostic"
 	"github.com/smm-h/pgdesign/internal/diff"
+	"github.com/smm-h/pgdesign/internal/discover"
 	"github.com/smm-h/pgdesign/internal/extregistry"
 	"github.com/smm-h/pgdesign/internal/format"
 	"github.com/smm-h/pgdesign/internal/generate"
@@ -207,11 +208,54 @@ func handleAudit(kwargs map[string]interface{}) int {
 		return exitCode
 	}
 
-	diags := audit.Audit(schema)
-	if len(diags) > 0 {
-		fmt.Fprint(os.Stderr, diagnostic.RenderTerminal(diags, true))
+	var allDiags []diagnostic.Diagnostic
+
+	// When --db is provided, discover FDs from live data for tables without declared FDs.
+	if dbURL, ok := kwargs["db"].(string); ok && dbURL != "" {
+		ctx := context.Background()
+		conn, err := pgx.Connect(ctx, dbURL)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: connect for FD discovery: %v\n", err)
+			return 1
+		}
+		defer conn.Close(ctx)
+
+		opts := discover.Options{}
+		for i := range schema.Tables {
+			tbl := &schema.Tables[i]
+			if len(tbl.Dependencies) > 0 {
+				continue
+			}
+			schemaName := tbl.Schema
+			if schemaName == "" {
+				schemaName = "public"
+			}
+			fds, discDiags, err := discover.Discover(conn, schemaName, tbl.Name, opts)
+			allDiags = append(allDiags, discDiags...)
+			if err != nil {
+				allDiags = append(allDiags, diagnostic.Diagnostic{
+					Severity: diagnostic.Warning,
+					Table:    tbl.Name,
+					Message:  fmt.Sprintf("FD discovery failed: %v", err),
+				})
+				continue
+			}
+			if len(fds) > 0 {
+				tbl.Dependencies = fds
+				allDiags = append(allDiags, diagnostic.Diagnostic{
+					Severity: diagnostic.Info,
+					Table:    tbl.Name,
+					Message:  fmt.Sprintf("Discovered %d FD(s) from data sample.", len(fds)),
+				})
+			}
+		}
 	}
-	if diagnostic.Diagnostics(diags).HasErrors() {
+
+	allDiags = append(allDiags, audit.Audit(schema)...)
+	if len(allDiags) > 0 {
+		fmt.Fprint(os.Stderr, diagnostic.RenderTerminal(allDiags, true))
+	}
+	if diagnostic.Diagnostics(allDiags).HasErrors() {
 		return 1
 	}
 	return 0
