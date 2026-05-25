@@ -20,6 +20,7 @@ import (
 	"github.com/smm-h/pgdesign/internal/model"
 	"github.com/smm-h/pgdesign/internal/parse"
 	"github.com/smm-h/pgdesign/internal/semtype"
+	"github.com/smm-h/pgdesign/internal/serve"
 	"github.com/smm-h/pgdesign/internal/validate"
 	"github.com/smm-h/strictcli/go/strictcli"
 )
@@ -100,7 +101,12 @@ func main() {
 		),
 	)
 
-	app.Command("serve", "Start the pgdesign language server", notImplemented)
+	app.Command("serve", "Start the pgdesign HTTP API server", handleServe,
+		strictcli.WithFlags(
+			strictcli.IntFlag("port", "HTTP port to listen on", strictcli.Default(8080)),
+			strictcli.StringFlag("schema", "Schema name to serve", strictcli.Repeatable()),
+		),
+	)
 
 	app.Run()
 }
@@ -755,6 +761,46 @@ func opSummary(op migrate.DDLOp) string {
 		target = op.Name
 	}
 	return target
+}
+
+func handleServe(kwargs map[string]interface{}) int {
+	dbURL, _ := kwargs["db"].(string)
+	if dbURL == "" {
+		fmt.Fprintln(os.Stderr, "error: --db is required for serve")
+		return 1
+	}
+
+	port := kwargs["port"].(int)
+
+	// Collect schema names from repeatable --schema flag.
+	var schemaNames []string
+	if raw, ok := kwargs["schema"].([]interface{}); ok {
+		for _, v := range raw {
+			if s, ok := v.(string); ok {
+				schemaNames = append(schemaNames, s)
+			}
+		}
+	}
+	if len(schemaNames) == 0 {
+		schemaNames = []string{"public"}
+	}
+
+	srv, err := serve.New(dbURL, schemaNames)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		return 1
+	}
+	defer srv.Close()
+
+	addr := fmt.Sprintf(":%d", port)
+	if !kwargs["quiet"].(bool) {
+		fmt.Printf("pgdesign serving on http://localhost:%d\n", port)
+	}
+	if err := srv.ListenAndServe(addr); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		return 1
+	}
+	return 0
 }
 
 func notImplemented(_ map[string]interface{}) int {
