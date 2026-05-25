@@ -1,6 +1,7 @@
 {
   "version": "0.1.2",
   "base_url": "https://pgdesign.smmh.dev",
+  "root_files": ["docs/_CLAUDE.md", "docs/_README.md"],
   "language": "go",
   "source": [
     "internal/diagnostic",
