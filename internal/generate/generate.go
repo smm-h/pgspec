@@ -41,8 +41,28 @@ func generateSQL(schema *model.Schema, opts Options) string {
 	var sections []string
 
 	// 1. CREATE SCHEMA
+	// In multi-schema mode, schema.Name is empty; emit CREATE SCHEMA for each
+	// distinct table schema instead.
 	if schema.Name != "" {
 		sections = append(sections, sql.CreateSchema(schema.Name, opts.Idempotent))
+	} else {
+		seen := make(map[string]bool)
+		var schemaStmts []string
+		for _, t := range schema.Tables {
+			if t.Schema != "" && !seen[t.Schema] {
+				seen[t.Schema] = true
+				schemaStmts = append(schemaStmts, sql.CreateSchema(t.Schema, opts.Idempotent))
+			}
+		}
+		for _, e := range schema.Enums {
+			if e.Schema != "" && !seen[e.Schema] {
+				seen[e.Schema] = true
+				schemaStmts = append(schemaStmts, sql.CreateSchema(e.Schema, opts.Idempotent))
+			}
+		}
+		if len(schemaStmts) > 0 {
+			sections = append(sections, strings.Join(schemaStmts, "\n"))
+		}
 	}
 
 	// 2. CREATE EXTENSION
@@ -69,7 +89,7 @@ func generateSQL(schema *model.Schema, opts Options) string {
 	if len(tables) > 0 {
 		var tableStmts []string
 		for i := range tables {
-			tableStmts = append(tableStmts, sql.CreateTable(&tables[i], schema.Name, opts.Idempotent))
+			tableStmts = append(tableStmts, sql.CreateTable(&tables[i], tables[i].Schema, opts.Idempotent))
 		}
 		sections = append(sections, strings.Join(tableStmts, "\n\n"))
 	}
@@ -81,7 +101,7 @@ func generateSQL(schema *model.Schema, opts Options) string {
 		fks := sortedFKs(t.FKs)
 		for _, fk := range fks {
 			fkCopy := fk
-			fkStmts = append(fkStmts, sql.AlterTableAddFK(schema.Name, t, &fkCopy))
+			fkStmts = append(fkStmts, sql.AlterTableAddFK(t.Schema, t, &fkCopy))
 		}
 	}
 	if len(fkStmts) > 0 {
@@ -95,7 +115,7 @@ func generateSQL(schema *model.Schema, opts Options) string {
 		uqs := sortedUniques(t.Uniques)
 		for _, uq := range uqs {
 			uqCopy := uq
-			uqStmts = append(uqStmts, sql.AlterTableAddUnique(schema.Name, t.Name, &uqCopy))
+			uqStmts = append(uqStmts, sql.AlterTableAddUnique(t.Schema, t.Name, &uqCopy))
 		}
 	}
 	if len(uqStmts) > 0 {
@@ -109,7 +129,7 @@ func generateSQL(schema *model.Schema, opts Options) string {
 		cks := sortedChecks(t.Checks)
 		for _, ck := range cks {
 			ckCopy := ck
-			ckStmts = append(ckStmts, sql.AlterTableAddCheck(schema.Name, t.Name, &ckCopy))
+			ckStmts = append(ckStmts, sql.AlterTableAddCheck(t.Schema, t.Name, &ckCopy))
 		}
 	}
 	if len(ckStmts) > 0 {
@@ -123,7 +143,7 @@ func generateSQL(schema *model.Schema, opts Options) string {
 		idxs := sortedIndexes(t.Indexes)
 		for _, idx := range idxs {
 			idxCopy := idx
-			idxStmts = append(idxStmts, sql.CreateIndex(schema.Name, &idxCopy, t.Name, opts.Idempotent))
+			idxStmts = append(idxStmts, sql.CreateIndex(t.Schema, &idxCopy, t.Name, opts.Idempotent))
 		}
 	}
 	if len(idxStmts) > 0 {
@@ -136,12 +156,12 @@ func generateSQL(schema *model.Schema, opts Options) string {
 		for i := range tables {
 			t := &tables[i]
 			if t.Comment != "" {
-				qualified := sql.QualifiedName(schema.Name, t.Name)
+				qualified := sql.QualifiedName(t.Schema, t.Name)
 				commentStmts = append(commentStmts, sql.CommentOn("TABLE", qualified, t.Comment))
 			}
 			for _, col := range t.Columns {
 				if col.Comment != "" {
-					qualified := sql.QualifiedName(schema.Name, t.Name) + "." + sql.QuoteIdent(col.Name)
+					qualified := sql.QualifiedName(t.Schema, t.Name) + "." + sql.QuoteIdent(col.Name)
 					commentStmts = append(commentStmts, sql.CommentOn("COLUMN", qualified, col.Comment))
 				}
 			}
@@ -156,7 +176,7 @@ func generateSQL(schema *model.Schema, opts Options) string {
 	for i := range tables {
 		t := &tables[i]
 		if t.Owner != "" {
-			ownerStmts = append(ownerStmts, sql.AlterTableOwner(schema.Name, t.Name, t.Owner))
+			ownerStmts = append(ownerStmts, sql.AlterTableOwner(t.Schema, t.Name, t.Owner))
 		}
 	}
 	if len(ownerStmts) > 0 {

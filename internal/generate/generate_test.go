@@ -387,6 +387,149 @@ func TestTrailingNewline(t *testing.T) {
 	}
 }
 
+func TestMultiSchemaQualifiedNames(t *testing.T) {
+	// In multi-schema mode, schema.Name is empty. Each table carries its own
+	// Schema field and all SQL statements must use that per-table schema.
+	schema := &model.Schema{
+		// Name intentionally empty -- multi-schema mode.
+		Enums: []model.Enum{
+			{Schema: "auth", Name: "role", Values: []string{"admin", "user"}},
+		},
+		Tables: []model.Table{
+			{
+				Name:   "users",
+				Schema: "auth",
+				Columns: []model.Column{
+					{Name: "id", PGType: "uuid", NotNull: true},
+					{Name: "role", PGType: "role", NotNull: true},
+				},
+				PK:      []string{"id"},
+				Comment: "All users",
+				Owner:   "auth_admin",
+				Indexes: []model.Index{
+					{Name: "idx_users_role", Columns: []string{"role"}},
+				},
+				Uniques: []model.UniqueConstraint{
+					{Name: "uq_users_id", Columns: []string{"id"}},
+				},
+				Checks: []model.CheckConstraint{
+					{Name: "ck_users_role", Expr: "role <> ''"},
+				},
+			},
+			{
+				Name:   "scores",
+				Schema: "game",
+				Columns: []model.Column{
+					{Name: "id", PGType: "uuid", NotNull: true},
+					{Name: "user_id", PGType: "uuid", NotNull: true},
+					{Name: "points", PGType: "integer", NotNull: true},
+				},
+				PK: []string{"id"},
+				FKs: []model.FK{
+					{
+						Name:       "fk_scores_users",
+						Columns:    []string{"user_id"},
+						RefSchema:  "auth",
+						RefTable:   "users",
+						RefColumns: []string{"id"},
+						OnDelete:   "CASCADE",
+					},
+				},
+			},
+		},
+	}
+
+	opts := Options{IncludeComments: true, Format: "sql"}
+	out := Generate(schema, opts)
+
+	// CREATE SCHEMA for both schemas.
+	if !strings.Contains(out, "CREATE SCHEMA auth;") {
+		t.Errorf("expected CREATE SCHEMA auth, got:\n%s", out)
+	}
+	if !strings.Contains(out, "CREATE SCHEMA game;") {
+		t.Errorf("expected CREATE SCHEMA game, got:\n%s", out)
+	}
+
+	// CREATE TYPE with correct schema.
+	if !strings.Contains(out, "CREATE TYPE auth.role AS ENUM") {
+		t.Errorf("expected auth-qualified enum, got:\n%s", out)
+	}
+
+	// CREATE TABLE with correct schema (not empty schema).
+	if !strings.Contains(out, "CREATE TABLE auth.users (") {
+		t.Errorf("expected CREATE TABLE auth.users, got:\n%s", out)
+	}
+	if !strings.Contains(out, "CREATE TABLE game.scores (") {
+		t.Errorf("expected CREATE TABLE game.scores, got:\n%s", out)
+	}
+	if strings.Contains(out, `"".`) {
+		t.Errorf("output contains empty-schema qualified name (\"\".): \n%s", out)
+	}
+
+	// ALTER TABLE FK uses game schema for the source table.
+	if !strings.Contains(out, "ALTER TABLE game.scores ADD CONSTRAINT fk_scores_users") {
+		t.Errorf("expected ALTER TABLE game.scores for FK, got:\n%s", out)
+	}
+
+	// UNIQUE constraint uses auth schema.
+	if !strings.Contains(out, "ALTER TABLE auth.users ADD CONSTRAINT uq_users_id") {
+		t.Errorf("expected ALTER TABLE auth.users for UNIQUE, got:\n%s", out)
+	}
+
+	// CHECK constraint uses auth schema.
+	if !strings.Contains(out, "ALTER TABLE auth.users ADD CONSTRAINT ck_users_role") {
+		t.Errorf("expected ALTER TABLE auth.users for CHECK, got:\n%s", out)
+	}
+
+	// INDEX uses auth schema.
+	if !strings.Contains(out, "CREATE INDEX idx_users_role ON auth.users") {
+		t.Errorf("expected CREATE INDEX ON auth.users, got:\n%s", out)
+	}
+
+	// COMMENT uses auth schema.
+	if !strings.Contains(out, "COMMENT ON TABLE auth.users IS") {
+		t.Errorf("expected COMMENT ON TABLE auth.users, got:\n%s", out)
+	}
+
+	// OWNER uses auth schema.
+	if !strings.Contains(out, "ALTER TABLE auth.users OWNER TO auth_admin") {
+		t.Errorf("expected ALTER TABLE auth.users OWNER TO, got:\n%s", out)
+	}
+}
+
+func TestUniqueIndex(t *testing.T) {
+	schema := &model.Schema{
+		Name: "app",
+		Tables: []model.Table{
+			{
+				Name:   "pairs",
+				Schema: "app",
+				Columns: []model.Column{
+					{Name: "id", PGType: "integer", NotNull: true},
+					{Name: "a", PGType: "integer", NotNull: true},
+					{Name: "b", PGType: "integer", NotNull: true},
+				},
+				PK: []string{"id"},
+				Indexes: []model.Index{
+					{Name: "idx_pairs_ab", Columns: []string{"a", "b"}, Unique: true},
+					{Name: "idx_pairs_b", Columns: []string{"b"}, Unique: false},
+				},
+			},
+		},
+	}
+
+	opts := Options{Format: "sql"}
+	out := Generate(schema, opts)
+
+	if !strings.Contains(out, "CREATE UNIQUE INDEX idx_pairs_ab ON app.pairs (a, b);") {
+		t.Errorf("expected CREATE UNIQUE INDEX for idx_pairs_ab, got:\n%s", out)
+	}
+	// Non-unique index should NOT have UNIQUE keyword.
+	if !strings.Contains(out, "CREATE INDEX idx_pairs_b ON app.pairs (b);") {
+		t.Errorf("expected plain CREATE INDEX for idx_pairs_b, got:\n%s", out)
+	}
+}
+
 func TestGoldenFile(t *testing.T) {
 	inputPath := filepath.Join("testdata", "simple_input.toml")
 
