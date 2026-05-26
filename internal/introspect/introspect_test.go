@@ -90,6 +90,39 @@ func TestMain(m *testing.M) {
 
 		ALTER TABLE ` + testSchema + `.posts
 			ADD CONSTRAINT ck_posts_title_not_empty CHECK (length(title) > 0);
+
+		-- Partitioned table: range partitioning on created_at
+		CREATE TABLE ` + testSchema + `.events (
+			id bigserial,
+			event_type text NOT NULL,
+			created_at timestamptz NOT NULL,
+			payload jsonb,
+			PRIMARY KEY (id, created_at)
+		) PARTITION BY RANGE (created_at);
+
+		CREATE TABLE ` + testSchema + `.events_2024
+			PARTITION OF ` + testSchema + `.events
+			FOR VALUES FROM ('2024-01-01') TO ('2025-01-01');
+
+		CREATE TABLE ` + testSchema + `.events_2025
+			PARTITION OF ` + testSchema + `.events
+			FOR VALUES FROM ('2025-01-01') TO ('2026-01-01');
+
+		-- Partitioned table: list partitioning on region
+		CREATE TABLE ` + testSchema + `.orders (
+			id bigserial,
+			region text NOT NULL,
+			total numeric NOT NULL,
+			PRIMARY KEY (id, region)
+		) PARTITION BY LIST (region);
+
+		CREATE TABLE ` + testSchema + `.orders_us
+			PARTITION OF ` + testSchema + `.orders
+			FOR VALUES IN ('us-east', 'us-west');
+
+		CREATE TABLE ` + testSchema + `.orders_eu
+			PARTITION OF ` + testSchema + `.orders
+			FOR VALUES IN ('eu-west', 'eu-central');
 	`
 
 	_, execErr := conn.Exec(ctx, setupSQL)
@@ -127,17 +160,21 @@ func TestIntrospectTables(t *testing.T) {
 		t.Errorf("Name = %q, want %q", schema.Name, testSchema)
 	}
 
-	// Expect 2 tables.
-	if len(schema.Tables) != 2 {
-		t.Fatalf("len(Tables) = %d, want 2", len(schema.Tables))
+	// Expect 8 tables: events, events_2024, events_2025, orders, orders_eu, orders_us, posts, users.
+	if len(schema.Tables) != 8 {
+		names := make([]string, len(schema.Tables))
+		for i, t := range schema.Tables {
+			names[i] = t.Name
+		}
+		t.Fatalf("len(Tables) = %d, want 8; got: %v", len(schema.Tables), names)
 	}
 
 	// Tables are ordered alphabetically.
-	if schema.Tables[0].Name != "posts" {
-		t.Errorf("Tables[0].Name = %q, want %q", schema.Tables[0].Name, "posts")
+	if schema.Tables[0].Name != "events" {
+		t.Errorf("Tables[0].Name = %q, want %q", schema.Tables[0].Name, "events")
 	}
-	if schema.Tables[1].Name != "users" {
-		t.Errorf("Tables[1].Name = %q, want %q", schema.Tables[1].Name, "users")
+	if schema.Tables[len(schema.Tables)-1].Name != "users" {
+		t.Errorf("Tables[last].Name = %q, want %q", schema.Tables[len(schema.Tables)-1].Name, "users")
 	}
 }
 
@@ -498,4 +535,136 @@ func findTable(tables []model.Table, name string) *model.Table {
 // containsStr checks if s contains substr.
 func containsStr(s, substr string) bool {
 	return len(s) > 0 && len(substr) > 0 && strings.Contains(s, substr)
+}
+
+// --- Unit tests for partition pure logic (no DB required) ---
+
+func TestMapPartStrategy(t *testing.T) {
+	tests := []struct {
+		code string
+		want string
+	}{
+		{"r", "range"},
+		{"l", "list"},
+		{"h", "hash"},
+		{"x", "x"}, // unknown passes through
+		{"", ""},
+	}
+	for _, tt := range tests {
+		got := mapPartStrategy(tt.code)
+		if got != tt.want {
+			t.Errorf("mapPartStrategy(%q) = %q, want %q", tt.code, got, tt.want)
+		}
+	}
+}
+
+func TestResolvePartColumn(t *testing.T) {
+	columns := []model.Column{
+		{Name: "id"},
+		{Name: "created_at"},
+		{Name: "region"},
+	}
+
+	tests := []struct {
+		name     string
+		attNums  []int32
+		want     string
+	}{
+		{"single column", []int32{2}, "created_at"},
+		{"first column", []int32{1}, "id"},
+		{"multi column", []int32{1, 2}, "id, created_at"},
+		{"expression key", []int32{0}, "(expression)"},
+		{"unknown attnum", []int32{99}, "attnum_99"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := resolvePartColumn(tt.attNums, columns)
+			if got != tt.want {
+				t.Errorf("resolvePartColumn(%v) = %q, want %q", tt.attNums, got, tt.want)
+			}
+		})
+	}
+}
+
+// --- Integration tests for partition introspection ---
+
+func TestIntrospectRangePartitioning(t *testing.T) {
+	schema, _, err := Introspect(testConnStr, []string{testSchema})
+	if err != nil {
+		t.Fatalf("Introspect failed: %v", err)
+	}
+
+	events := findTable(schema.Tables, "events")
+	if events == nil {
+		t.Fatal("events table not found")
+	}
+
+	if events.Partitioning == nil {
+		t.Fatal("events.Partitioning is nil, expected partition spec")
+	}
+
+	ps := events.Partitioning
+	if ps.Strategy != "range" {
+		t.Errorf("Strategy = %q, want %q", ps.Strategy, "range")
+	}
+	if ps.Column != "created_at" {
+		t.Errorf("Column = %q, want %q", ps.Column, "created_at")
+	}
+	if len(ps.Children) != 2 {
+		t.Fatalf("len(Children) = %d, want 2", len(ps.Children))
+	}
+
+	// Children are ordered by name.
+	if ps.Children[0].Strategy != "events_2024" {
+		t.Errorf("Children[0].Strategy = %q, want %q", ps.Children[0].Strategy, "events_2024")
+	}
+	if ps.Children[0].Column == "" {
+		t.Error("Children[0].Column (bound expr) is empty")
+	}
+	if ps.Children[1].Strategy != "events_2025" {
+		t.Errorf("Children[1].Strategy = %q, want %q", ps.Children[1].Strategy, "events_2025")
+	}
+}
+
+func TestIntrospectListPartitioning(t *testing.T) {
+	schema, _, err := Introspect(testConnStr, []string{testSchema})
+	if err != nil {
+		t.Fatalf("Introspect failed: %v", err)
+	}
+
+	orders := findTable(schema.Tables, "orders")
+	if orders == nil {
+		t.Fatal("orders table not found")
+	}
+
+	if orders.Partitioning == nil {
+		t.Fatal("orders.Partitioning is nil, expected partition spec")
+	}
+
+	ps := orders.Partitioning
+	if ps.Strategy != "list" {
+		t.Errorf("Strategy = %q, want %q", ps.Strategy, "list")
+	}
+	if ps.Column != "region" {
+		t.Errorf("Column = %q, want %q", ps.Column, "region")
+	}
+	if len(ps.Children) != 2 {
+		t.Fatalf("len(Children) = %d, want 2", len(ps.Children))
+	}
+}
+
+func TestIntrospectRegularTableNoPartitioning(t *testing.T) {
+	schema, _, err := Introspect(testConnStr, []string{testSchema})
+	if err != nil {
+		t.Fatalf("Introspect failed: %v", err)
+	}
+
+	users := findTable(schema.Tables, "users")
+	if users == nil {
+		t.Fatal("users table not found")
+	}
+
+	if users.Partitioning != nil {
+		t.Errorf("users.Partitioning = %v, want nil (regular table)", users.Partitioning)
+	}
 }
