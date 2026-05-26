@@ -47,6 +47,8 @@ type Table struct {
 	Dependencies []fd.FuncDep       `json:"dependencies,omitempty"`
 	Maintenance  *MaintenanceConfig `json:"maintenance,omitempty"`
 	Owner        string             `json:"owner,omitempty"`
+
+	candidateKeys [][]string // cached result of CandidateKeys()
 }
 
 // HasIndexCovering returns true if any index's leading columns cover all of the
@@ -77,12 +79,17 @@ func prefixCovers(indexCols []string, targets []string) bool {
 }
 
 // CandidateKeys computes candidate keys from the table's functional dependencies.
+// The result is cached after the first call.
 func (t *Table) CandidateKeys() [][]string {
+	if t.candidateKeys != nil {
+		return t.candidateKeys
+	}
 	allCols := make([]string, len(t.Columns))
 	for i, c := range t.Columns {
 		allCols[i] = c.Name
 	}
-	return fd.CandidateKeys(allCols, t.Dependencies)
+	t.candidateKeys = fd.CandidateKeys(allCols, t.Dependencies)
+	return t.candidateKeys
 }
 
 // Column represents a resolved column definition.

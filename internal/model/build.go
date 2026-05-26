@@ -343,6 +343,16 @@ func resolvePartitioning(raw *parse.RawPartitioning) *PartitionSpec {
 	return ps
 }
 
+// constraintName generates a constraint name following the same convention as
+// sql.ConstraintName: kind_table_refs joined by underscores. Duplicated here
+// because internal/sql imports internal/model, so the reverse import would
+// create a cycle.
+func constraintName(table, kind string, refs ...string) string {
+	parts := []string{kind, table}
+	parts = append(parts, refs...)
+	return strings.Join(parts, "_")
+}
+
 // enrich materializes auto-indexes for FK columns that lack index coverage.
 func enrich(schema *Schema) diagnostic.Diagnostics {
 	var diags diagnostic.Diagnostics
@@ -351,8 +361,7 @@ func enrich(schema *Schema) diagnostic.Diagnostics {
 		t := &schema.Tables[i]
 		for _, fk := range t.FKs {
 			if !t.HasIndexCovering(fk.Columns) {
-				// TODO: sql.ConstraintName will replace this naming logic.
-				idxName := fmt.Sprintf("idx_%s_%s", t.Name, strings.Join(fk.Columns, "_"))
+				idxName := constraintName(t.Name, "idx", fk.Columns...)
 				t.Indexes = append(t.Indexes, Index{
 					Name:     idxName,
 					Columns:  fk.Columns,
