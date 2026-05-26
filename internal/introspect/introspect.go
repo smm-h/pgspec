@@ -150,7 +150,7 @@ func queryEnums(ctx context.Context, conn *pgx.Conn, schemaName string) ([]model
 // queryTables returns all tables (regular + partitioned) in the given schema.
 func queryTables(ctx context.Context, conn *pgx.Conn, schemaName string) ([]model.Table, []diagnostic.Diagnostic, error) {
 	rows, err := conn.Query(ctx, `
-		SELECT c.oid, c.relname, d.description
+		SELECT c.oid, c.relname, c.relkind::text, d.description
 		FROM pg_class c
 		JOIN pg_namespace n ON c.relnamespace = n.oid
 		LEFT JOIN pg_description d ON d.objoid = c.oid AND d.objsubid = 0
@@ -165,6 +165,7 @@ func queryTables(ctx context.Context, conn *pgx.Conn, schemaName string) ([]mode
 	type tableInfo struct {
 		oid     uint32
 		name    string
+		relkind string // "r" = regular, "p" = partitioned
 		comment string
 	}
 
@@ -172,7 +173,7 @@ func queryTables(ctx context.Context, conn *pgx.Conn, schemaName string) ([]mode
 	for rows.Next() {
 		var ti tableInfo
 		var comment *string
-		if err := rows.Scan(&ti.oid, &ti.name, &comment); err != nil {
+		if err := rows.Scan(&ti.oid, &ti.name, &ti.relkind, &comment); err != nil {
 			return nil, nil, err
 		}
 		if comment != nil {
@@ -236,6 +237,15 @@ func queryTables(ctx context.Context, conn *pgx.Conn, schemaName string) ([]mode
 			return nil, nil, fmt.Errorf("checks for %s.%s: %w", schemaName, ti.name, err)
 		}
 		t.Checks = cks
+
+		// Partition metadata (only for partitioned tables).
+		if ti.relkind == "p" {
+			ps, err := queryPartitionSpec(ctx, conn, ti.oid, t.Columns)
+			if err != nil {
+				return nil, nil, fmt.Errorf("partitioning for %s.%s: %w", schemaName, ti.name, err)
+			}
+			t.Partitioning = ps
+		}
 
 		tables = append(tables, t)
 	}
@@ -369,9 +379,10 @@ func queryIndexes(ctx context.Context, conn *pgx.Conn, tableOID uint32, schemaNa
 			Unique: isUnique,
 		}
 
-		// Parse the index definition to extract columns, WHERE, INCLUDE, opclass.
+		// Parse the index definition to extract columns, WHERE, INCLUDE, opclass, sort order.
 		parsed := parseIndexDef(definition)
 		idx.Columns = parsed.columns
+		idx.Desc = parsed.desc
 		idx.Where = parsed.where
 		idx.Include = parsed.include
 		idx.Opclasses = parsed.opclasses
@@ -390,6 +401,7 @@ func queryIndexes(ctx context.Context, conn *pgx.Conn, tableOID uint32, schemaNa
 // parsedIndex holds parsed components of a pg_get_indexdef() string.
 type parsedIndex struct {
 	columns   []string
+	desc      []bool // parallel to columns; true if DESC
 	where     string
 	include   []string
 	opclasses map[string]string
@@ -408,9 +420,9 @@ func parseIndexDef(def string) parsedIndex {
 		return p
 	}
 
-	// Parse columns and detect per-column opclasses.
+	// Parse columns and detect per-column opclasses and sort directions.
 	colStr := m[1]
-	p.columns, p.opclasses = parseIndexColumns(colStr)
+	p.columns, p.desc, p.opclasses = parseIndexColumns(colStr)
 
 	// INCLUDE columns.
 	if m[2] != "" {
@@ -426,34 +438,63 @@ func parseIndexDef(def string) parsedIndex {
 }
 
 // parseIndexColumns parses the column list from an index definition,
-// extracting per-column opclasses if present.
-func parseIndexColumns(colStr string) ([]string, map[string]string) {
+// extracting per-column opclasses and sort directions if present.
+func parseIndexColumns(colStr string) ([]string, []bool, map[string]string) {
 	parts := splitAndTrim(colStr)
 	var columns []string
+	var desc []bool
 	var opclasses map[string]string
+	anyDesc := false
 
 	for _, part := range parts {
 		// Column may have opclass suffix like "col varchar_pattern_ops"
+		// and/or sort direction suffix like "col DESC" or "col opclass DESC".
 		tokens := strings.Fields(part)
+		isDesc := false
+
+		// Check if the last token is a sort direction.
 		if len(tokens) >= 2 {
-			// Check if the last token looks like an opclass (contains _ops).
+			last := strings.ToUpper(tokens[len(tokens)-1])
+			if last == "DESC" {
+				isDesc = true
+				anyDesc = true
+				tokens = tokens[:len(tokens)-1]
+			} else if last == "ASC" {
+				tokens = tokens[:len(tokens)-1]
+			}
+		}
+
+		if len(tokens) >= 2 {
+			// Check if the last remaining token looks like an opclass (contains _ops).
 			last := tokens[len(tokens)-1]
 			if strings.Contains(last, "_ops") {
 				colName := strings.Join(tokens[:len(tokens)-1], " ")
 				columns = append(columns, colName)
+				desc = append(desc, isDesc)
 				if opclasses == nil {
 					opclasses = make(map[string]string)
 				}
 				opclasses[colName] = last
 			} else {
-				columns = append(columns, part)
+				colName := strings.Join(tokens, " ")
+				columns = append(columns, colName)
+				desc = append(desc, isDesc)
 			}
+		} else if len(tokens) == 1 {
+			columns = append(columns, tokens[0])
+			desc = append(desc, isDesc)
 		} else {
 			columns = append(columns, part)
+			desc = append(desc, isDesc)
 		}
 	}
 
-	return columns, opclasses
+	// Omit desc slice if all columns are ASC.
+	if !anyDesc {
+		desc = nil
+	}
+
+	return columns, desc, opclasses
 }
 
 // splitAndTrim splits a comma-separated string and trims whitespace.
@@ -526,4 +567,144 @@ func queryCheckConstraints(ctx context.Context, conn *pgx.Conn, tableOID uint32)
 		})
 	}
 	return cks, rows.Err()
+}
+
+// mapPartStrategy maps a pg_partitioned_table.partstrat character to a strategy name.
+func mapPartStrategy(code string) string {
+	switch code {
+	case "r":
+		return "range"
+	case "l":
+		return "list"
+	case "h":
+		return "hash"
+	default:
+		return code
+	}
+}
+
+// queryPartitionSpec queries partition metadata for a partitioned table and
+// returns a fully populated PartitionSpec including recursive children.
+func queryPartitionSpec(ctx context.Context, conn *pgx.Conn, tableOID uint32, columns []model.Column) (*model.PartitionSpec, error) {
+	// Query partition strategy and key column attribute numbers.
+	var stratCode string
+	var partAttrs []int32
+	err := conn.QueryRow(ctx, `
+		SELECT partstrat::text, string_to_array(partattrs::text, ' ')::int[]
+		FROM pg_partitioned_table
+		WHERE partrelid = $1
+	`, tableOID).Scan(&stratCode, &partAttrs)
+	if err != nil {
+		return nil, fmt.Errorf("pg_partitioned_table: %w", err)
+	}
+
+	// Resolve attribute numbers to column names.
+	partColumn := resolvePartColumn(partAttrs, columns)
+
+	ps := &model.PartitionSpec{
+		Strategy: mapPartStrategy(stratCode),
+		Column:   partColumn,
+	}
+
+	// Query child partitions.
+	children, err := queryPartitionChildren(ctx, conn, tableOID)
+	if err != nil {
+		return nil, err
+	}
+	ps.Children = children
+
+	return ps, nil
+}
+
+// resolvePartColumn maps partition key attribute numbers to column names.
+// For single-column partitioning (the common case), returns the column name.
+// For multi-column or expression-based keys, joins with commas.
+func resolvePartColumn(attNums []int32, columns []model.Column) string {
+	// Build attnum-to-name map. attnum is 1-based.
+	attnumMap := make(map[int32]string, len(columns))
+	for i, c := range columns {
+		attnumMap[int32(i+1)] = c.Name
+	}
+
+	var names []string
+	for _, num := range attNums {
+		if num == 0 {
+			// attnum 0 means an expression-based partition key.
+			names = append(names, "(expression)")
+		} else if name, ok := attnumMap[num]; ok {
+			names = append(names, name)
+		} else {
+			names = append(names, fmt.Sprintf("attnum_%d", num))
+		}
+	}
+
+	return strings.Join(names, ", ")
+}
+
+// queryPartitionChildren returns child partitions for a parent OID,
+// recursing into sub-partitioned children.
+func queryPartitionChildren(ctx context.Context, conn *pgx.Conn, parentOID uint32) ([]model.PartitionSpec, error) {
+	rows, err := conn.Query(ctx, `
+		SELECT c.oid, c.relname, c.relkind::text,
+		       pg_get_expr(c.relpartbound, c.oid) as bound_expr
+		FROM pg_inherits i
+		JOIN pg_class c ON c.oid = i.inhrelid
+		WHERE i.inhparent = $1
+		ORDER BY c.relname
+	`, parentOID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	type childInfo struct {
+		oid       uint32
+		name      string
+		relkind   string
+		boundExpr string
+	}
+
+	var childInfos []childInfo
+	for rows.Next() {
+		var ci childInfo
+		var boundExpr *string
+		if err := rows.Scan(&ci.oid, &ci.name, &ci.relkind, &boundExpr); err != nil {
+			return nil, err
+		}
+		if boundExpr != nil {
+			ci.boundExpr = *boundExpr
+		}
+		childInfos = append(childInfos, ci)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	var children []model.PartitionSpec
+	for _, ci := range childInfos {
+		child := model.PartitionSpec{
+			// Convention: child.Strategy = partition name, child.Column = bound expression.
+			Strategy: ci.name,
+			Column:   ci.boundExpr,
+		}
+
+		// If the child is itself partitioned, recurse to get its sub-partitions.
+		if ci.relkind == "p" {
+			// Query child's columns for resolving its own partition key.
+			childCols, err := queryColumns(ctx, conn, ci.oid)
+			if err != nil {
+				return nil, fmt.Errorf("columns for child %s: %w", ci.name, err)
+			}
+			subSpec, err := queryPartitionSpec(ctx, conn, ci.oid, childCols)
+			if err != nil {
+				return nil, fmt.Errorf("sub-partition for %s: %w", ci.name, err)
+			}
+			// Merge sub-partition info into the child.
+			child.Children = subSpec.Children
+		}
+
+		children = append(children, child)
+	}
+
+	return children, nil
 }

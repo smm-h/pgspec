@@ -605,3 +605,134 @@ func TestEnumResolution(t *testing.T) {
 		t.Errorf("expected 2 enum values, got %d", len(schema.Enums[0].Values))
 	}
 }
+
+func TestResolveIndex_PlainColumns(t *testing.T) {
+	// Plain column names without direction: should produce nil Desc (all ASC).
+	raw := parse.RawIndex{
+		Name:    "idx_test",
+		Columns: []string{"a", "b"},
+	}
+	idx := resolveIndex("idx_test", raw)
+	if len(idx.Columns) != 2 || idx.Columns[0] != "a" || idx.Columns[1] != "b" {
+		t.Errorf("expected columns [a, b], got %v", idx.Columns)
+	}
+	if idx.Desc != nil {
+		t.Errorf("expected nil Desc for all-ASC columns, got %v", idx.Desc)
+	}
+}
+
+func TestResolveIndex_DESCColumn(t *testing.T) {
+	// "b DESC" should produce Desc[1]=true.
+	raw := parse.RawIndex{
+		Name:    "idx_test",
+		Columns: []string{"a", "b DESC"},
+	}
+	idx := resolveIndex("idx_test", raw)
+	if len(idx.Columns) != 2 || idx.Columns[0] != "a" || idx.Columns[1] != "b" {
+		t.Errorf("expected columns [a, b], got %v", idx.Columns)
+	}
+	if len(idx.Desc) != 2 || idx.Desc[0] != false || idx.Desc[1] != true {
+		t.Errorf("expected Desc [false, true], got %v", idx.Desc)
+	}
+}
+
+func TestResolveIndex_ExplicitASC(t *testing.T) {
+	// "a ASC" should strip the ASC suffix and leave Desc as nil (all ASC).
+	raw := parse.RawIndex{
+		Name:    "idx_test",
+		Columns: []string{"a ASC", "b ASC"},
+	}
+	idx := resolveIndex("idx_test", raw)
+	if len(idx.Columns) != 2 || idx.Columns[0] != "a" || idx.Columns[1] != "b" {
+		t.Errorf("expected columns [a, b], got %v", idx.Columns)
+	}
+	if idx.Desc != nil {
+		t.Errorf("expected nil Desc for all-ASC, got %v", idx.Desc)
+	}
+}
+
+func TestResolveIndex_MixedDirections(t *testing.T) {
+	raw := parse.RawIndex{
+		Name:    "idx_test",
+		Columns: []string{"a DESC", "b", "c DESC"},
+	}
+	idx := resolveIndex("idx_test", raw)
+	if len(idx.Columns) != 3 {
+		t.Fatalf("expected 3 columns, got %d", len(idx.Columns))
+	}
+	if idx.Columns[0] != "a" || idx.Columns[1] != "b" || idx.Columns[2] != "c" {
+		t.Errorf("expected columns [a, b, c], got %v", idx.Columns)
+	}
+	if len(idx.Desc) != 3 || idx.Desc[0] != true || idx.Desc[1] != false || idx.Desc[2] != true {
+		t.Errorf("expected Desc [true, false, true], got %v", idx.Desc)
+	}
+}
+
+func TestResolveIndex_CaseInsensitiveDirection(t *testing.T) {
+	raw := parse.RawIndex{
+		Name:    "idx_test",
+		Columns: []string{"a desc", "b Asc"},
+	}
+	idx := resolveIndex("idx_test", raw)
+	if idx.Columns[0] != "a" || idx.Columns[1] != "b" {
+		t.Errorf("expected columns [a, b], got %v", idx.Columns)
+	}
+	if len(idx.Desc) != 2 || idx.Desc[0] != true || idx.Desc[1] != false {
+		t.Errorf("expected Desc [true, false], got %v", idx.Desc)
+	}
+}
+
+func TestBuild_IndexDESCEndToEnd(t *testing.T) {
+	reg := testRegistry()
+	trueVal := true
+	raw := &parse.RawSchema{
+		Meta: parse.RawMeta{Schema: "public"},
+		Tables: []parse.RawTable{
+			{
+				Name:    "messages",
+				PK:      []string{"id"},
+				Columns: []parse.RawColumn{
+					{Name: "id", Type: "id"},
+					{Name: "channel", Type: "short_text"},
+					{Name: "sent_at", Type: "timestamp"},
+				},
+				Indexes: map[string]parse.RawIndex{
+					"idx_messages_channel_sent": {
+						Columns: []string{"channel", "sent_at DESC"},
+						Unique:  &trueVal,
+					},
+				},
+			},
+		},
+	}
+
+	schema, diags := Build(raw, reg)
+	if diags.HasErrors() {
+		t.Fatalf("unexpected errors: %v", diags)
+	}
+
+	msgs := schema.TableByName("public", "messages")
+	if msgs == nil {
+		t.Fatal("messages table not found")
+	}
+
+	var found bool
+	for _, idx := range msgs.Indexes {
+		if idx.Name == "idx_messages_channel_sent" {
+			found = true
+			if len(idx.Columns) != 2 || idx.Columns[0] != "channel" || idx.Columns[1] != "sent_at" {
+				t.Errorf("expected columns [channel, sent_at], got %v", idx.Columns)
+			}
+			if len(idx.Desc) != 2 || idx.Desc[0] != false || idx.Desc[1] != true {
+				t.Errorf("expected Desc [false, true], got %v", idx.Desc)
+			}
+			if !idx.Unique {
+				t.Error("expected index to be unique")
+			}
+			break
+		}
+	}
+	if !found {
+		t.Error("idx_messages_channel_sent not found in indexes")
+	}
+}

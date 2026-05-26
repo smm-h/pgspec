@@ -29,6 +29,7 @@ type DDLOp struct {
 	Method    string            // for indexes
 	Where     string            // for partial indexes
 	Opclasses map[string]string // per-column opclass
+	Desc      []bool            // per-column DESC (parallel to Columns)
 	Include   []string
 	Comment  string   // for tables
 	PK       []string // for create_table

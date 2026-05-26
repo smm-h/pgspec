@@ -538,6 +538,75 @@ func TestAlterTableOwner(t *testing.T) {
 	}
 }
 
+func TestCreateIndex_AllASC(t *testing.T) {
+	// All ASC (default) -- no Desc field set. Backward compatible.
+	index := &model.Index{
+		Name:    "idx_events_channel_sent",
+		Columns: []string{"channel", "sent_at"},
+	}
+
+	got := CreateIndex("chat", index, "events", false, false)
+
+	if !strings.Contains(got, "(channel, sent_at)") {
+		t.Errorf("expected plain column list without direction, got:\n%s", got)
+	}
+	if strings.Contains(got, "DESC") {
+		t.Errorf("should not contain DESC when all columns are ASC, got:\n%s", got)
+	}
+}
+
+func TestCreateIndex_SomeDESC(t *testing.T) {
+	// Mixed: first column ASC, second column DESC.
+	index := &model.Index{
+		Name:    "idx_events_channel_sent",
+		Columns: []string{"channel", "sent_at"},
+		Desc:    []bool{false, true},
+	}
+
+	got := CreateIndex("chat", index, "events", false, false)
+
+	if !strings.Contains(got, "sent_at DESC") {
+		t.Errorf("expected sent_at DESC, got:\n%s", got)
+	}
+	if strings.Contains(got, "channel DESC") {
+		t.Errorf("should not have DESC on channel, got:\n%s", got)
+	}
+	// Verify the full column expression.
+	if !strings.Contains(got, "(channel, sent_at DESC)") {
+		t.Errorf("expected (channel, sent_at DESC), got:\n%s", got)
+	}
+}
+
+func TestCreateIndex_AllDESC(t *testing.T) {
+	index := &model.Index{
+		Name:    "idx_events_recent",
+		Columns: []string{"created_at", "id"},
+		Desc:    []bool{true, true},
+	}
+
+	got := CreateIndex("public", index, "events", false, false)
+
+	if !strings.Contains(got, "(created_at DESC, id DESC)") {
+		t.Errorf("expected both columns DESC, got:\n%s", got)
+	}
+}
+
+func TestCreateIndex_DESCWithOpclass(t *testing.T) {
+	index := &model.Index{
+		Name:      "idx_docs_title",
+		Columns:   []string{"title"},
+		Desc:      []bool{true},
+		Opclasses: map[string]string{"title": "varchar_pattern_ops"},
+	}
+
+	got := CreateIndex("public", index, "docs", false, false)
+
+	// Opclass should come before DESC.
+	if !strings.Contains(got, "title varchar_pattern_ops DESC") {
+		t.Errorf("expected opclass before DESC, got:\n%s", got)
+	}
+}
+
 func TestCreateIndex_Concurrently(t *testing.T) {
 	index := &model.Index{
 		Name:    "idx_posts_author_id",
@@ -627,6 +696,83 @@ func TestAlterTableAddUnique_Idempotent(t *testing.T) {
 	}
 	if !strings.Contains(got, "ALTER TABLE public.users ADD CONSTRAINT uq_users_email UNIQUE (email);") {
 		t.Errorf("expected inner ALTER TABLE statement, got:\n%s", got)
+	}
+}
+
+func TestCreatePartitionOf(t *testing.T) {
+	child := &model.PartitionSpec{
+		Name:  "events_2024_01",
+		Bound: "FROM ('2024-01-01') TO ('2024-02-01')",
+	}
+
+	got := CreatePartitionOf("app", child, "events", false)
+
+	if !strings.Contains(got, "CREATE TABLE app.events_2024_01 PARTITION OF app.events") {
+		t.Errorf("expected CREATE TABLE PARTITION OF, got:\n%s", got)
+	}
+	if !strings.Contains(got, "FOR VALUES FROM ('2024-01-01') TO ('2024-02-01')") {
+		t.Errorf("expected FOR VALUES bound, got:\n%s", got)
+	}
+	if strings.Contains(got, "IF NOT EXISTS") {
+		t.Errorf("should not contain IF NOT EXISTS when idempotent=false, got:\n%s", got)
+	}
+}
+
+func TestCreatePartitionOf_Idempotent(t *testing.T) {
+	child := &model.PartitionSpec{
+		Name:  "events_2024_01",
+		Bound: "FROM ('2024-01-01') TO ('2024-02-01')",
+	}
+
+	got := CreatePartitionOf("app", child, "events", true)
+
+	if !strings.Contains(got, "CREATE TABLE IF NOT EXISTS app.events_2024_01 PARTITION OF app.events") {
+		t.Errorf("expected IF NOT EXISTS, got:\n%s", got)
+	}
+}
+
+func TestCreatePartmanParent(t *testing.T) {
+	got := CreatePartmanParent("app", "events", "created_at", "1 month", 4)
+
+	if !strings.Contains(got, "partman.create_parent(") {
+		t.Errorf("expected partman.create_parent call, got:\n%s", got)
+	}
+	if !strings.Contains(got, "p_parent_table := 'app.events'") {
+		t.Errorf("expected p_parent_table, got:\n%s", got)
+	}
+	if !strings.Contains(got, "p_control := 'created_at'") {
+		t.Errorf("expected p_control, got:\n%s", got)
+	}
+	if !strings.Contains(got, "p_interval := '1 month'") {
+		t.Errorf("expected p_interval, got:\n%s", got)
+	}
+	if !strings.Contains(got, "p_premake := 4") {
+		t.Errorf("expected p_premake, got:\n%s", got)
+	}
+}
+
+func TestUpdatePartmanConfig(t *testing.T) {
+	got := UpdatePartmanConfig("app", "events", "6 months", true)
+
+	if !strings.Contains(got, "UPDATE partman.part_config") {
+		t.Errorf("expected UPDATE partman.part_config, got:\n%s", got)
+	}
+	if !strings.Contains(got, "retention = '6 months'") {
+		t.Errorf("expected retention value, got:\n%s", got)
+	}
+	if !strings.Contains(got, "retention_keep_table = true") {
+		t.Errorf("expected retention_keep_table = true, got:\n%s", got)
+	}
+	if !strings.Contains(got, "parent_table = 'app.events'") {
+		t.Errorf("expected parent_table WHERE clause, got:\n%s", got)
+	}
+}
+
+func TestUpdatePartmanConfig_KeepTableFalse(t *testing.T) {
+	got := UpdatePartmanConfig("app", "events", "3 months", false)
+
+	if !strings.Contains(got, "retention_keep_table = false") {
+		t.Errorf("expected retention_keep_table = false, got:\n%s", got)
 	}
 }
 

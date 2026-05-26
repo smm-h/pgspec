@@ -1,0 +1,28 @@
+[meta]
+version = 16
+schema = "chat"
+
+[tables.messages]
+comment = "Chat messages"
+pk = ["id"]
+
+[tables.messages.columns.id]
+type = "id"
+
+[tables.messages.columns.channel]
+type = "short_text"
+
+[tables.messages.columns.sent_at]
+type = "timestamp"
+
+[tables.messages.columns.score]
+type = "counter"
+
+[tables.messages.indexes.idx_messages_channel_sent]
+columns = ["channel", "sent_at DESC"]
+
+[tables.messages.indexes.idx_messages_score]
+columns = ["score DESC"]
+
+[tables.messages.indexes.idx_messages_plain]
+columns = ["channel"]

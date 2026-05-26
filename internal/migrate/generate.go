@@ -349,6 +349,7 @@ func makeIndexOp(tableName string, idx model.Index) DDLOp {
 		Table:     tableName,
 		Name:      idx.Name,
 		Columns:   idx.Columns,
+		Desc:      idx.Desc,
 		Method:    idx.Method,
 		Opclasses: idx.Opclasses,
 		Where:     idx.Where,

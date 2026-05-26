@@ -299,9 +299,14 @@ func resolveFK(name string, rawFK parse.RawFK, schemaName string) FK {
 
 // resolveIndex converts a raw index definition to a model Index.
 func resolveIndex(name string, rawIdx parse.RawIndex) Index {
+	// Parse column names and sort direction from raw strings.
+	// Format: "column_name" (ASC, default) or "column_name DESC" or "column_name ASC".
+	columns, desc := parseIndexColumns(rawIdx.Columns)
+
 	idx := Index{
 		Name:    name,
-		Columns: rawIdx.Columns,
+		Columns: columns,
+		Desc:    desc,
 		Include: rawIdx.Include,
 	}
 	if rawIdx.Method != nil {
@@ -315,8 +320,8 @@ func resolveIndex(name string, rawIdx parse.RawIndex) Index {
 		}
 	} else if rawIdx.Opclass != nil {
 		// Single opclass: expand to all columns.
-		idx.Opclasses = make(map[string]string, len(rawIdx.Columns))
-		for _, col := range rawIdx.Columns {
+		idx.Opclasses = make(map[string]string, len(columns))
+		for _, col := range columns {
 			idx.Opclasses[col] = *rawIdx.Opclass
 		}
 	}
@@ -329,11 +334,46 @@ func resolveIndex(name string, rawIdx parse.RawIndex) Index {
 	return idx
 }
 
+// parseIndexColumns splits raw column strings like "col DESC" into separate
+// column names and a parallel desc slice. A plain "col" or "col ASC" is ASC
+// (desc=false). "col DESC" is desc=true. The comparison is case-insensitive.
+func parseIndexColumns(raw []string) ([]string, []bool) {
+	columns := make([]string, len(raw))
+	desc := make([]bool, len(raw))
+	anyDesc := false
+	for i, s := range raw {
+		s = strings.TrimSpace(s)
+		if last := strings.LastIndexByte(s, ' '); last >= 0 {
+			suffix := strings.ToUpper(s[last+1:])
+			if suffix == "DESC" {
+				columns[i] = strings.TrimSpace(s[:last])
+				desc[i] = true
+				anyDesc = true
+				continue
+			}
+			if suffix == "ASC" {
+				columns[i] = strings.TrimSpace(s[:last])
+				desc[i] = false
+				continue
+			}
+		}
+		columns[i] = s
+		desc[i] = false
+	}
+	// Omit desc slice if all columns are ASC (backward compatibility).
+	if !anyDesc {
+		return columns, nil
+	}
+	return columns, desc
+}
+
 // resolvePartitioning converts raw partitioning into a model PartitionSpec.
 func resolvePartitioning(raw *parse.RawPartitioning) *PartitionSpec {
 	ps := &PartitionSpec{
 		Strategy: raw.Strategy,
 		Column:   raw.Column,
+		Name:     raw.Name,
+		Bound:    raw.Bound,
 	}
 	for _, child := range raw.Partitions {
 		childCopy := child

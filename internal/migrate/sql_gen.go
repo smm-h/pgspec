@@ -167,6 +167,7 @@ func opCreateIndex(op DDLOp) string {
 	idx := &model.Index{
 		Name:      op.Name,
 		Columns:   op.Columns,
+		Desc:      op.Desc,
 		Method:    op.Method,
 		Opclasses: op.Opclasses,
 		Where:     op.Where,
@@ -188,6 +189,7 @@ func opCreateIndexConcurrently(op DDLOp) string {
 	idx := &model.Index{
 		Name:      op.Name,
 		Columns:   op.Columns,
+		Desc:      op.Desc,
 		Method:    op.Method,
 		Opclasses: op.Opclasses,
 		Where:     op.Where,

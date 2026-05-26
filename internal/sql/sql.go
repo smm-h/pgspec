@@ -397,12 +397,15 @@ func CreateIndex(schemaName string, index *model.Index, tableName string, idempo
 
 	qualified := QualifiedName(schemaName, tableName)
 
-	// Build column list with optional per-column opclass.
+	// Build column list with optional per-column opclass and sort direction.
 	colExprs := make([]string, len(index.Columns))
 	for i, c := range index.Columns {
 		expr := QuoteIdent(c)
 		if oc, ok := index.Opclasses[c]; ok && oc != "" {
 			expr += " " + oc
+		}
+		if i < len(index.Desc) && index.Desc[i] {
+			expr += " DESC"
 		}
 		colExprs[i] = expr
 	}
@@ -447,6 +450,51 @@ func CommentOn(objectType, qualifiedName, comment string) string {
 	escaped := strings.ReplaceAll(comment, "'", "''")
 	return fmt.Sprintf("COMMENT ON %s %s IS '%s';",
 		strings.ToUpper(objectType), qualifiedName, escaped)
+}
+
+// CreatePartitionOf generates a CREATE TABLE ... PARTITION OF statement for a
+// child partition. The bound expression is emitted verbatim (e.g.
+// "FROM ('2024-01-01') TO ('2024-02-01')").
+func CreatePartitionOf(schemaName string, childSpec *model.PartitionSpec, parentTable string, idempotent bool) string {
+	ifne := ""
+	if idempotent {
+		ifne = " IF NOT EXISTS"
+	}
+	childQualified := QualifiedName(schemaName, childSpec.Name)
+	parentQualified := QualifiedName(schemaName, parentTable)
+	return fmt.Sprintf("CREATE TABLE%s %s PARTITION OF %s\n  FOR VALUES %s;",
+		ifne, childQualified, parentQualified, childSpec.Bound)
+}
+
+// CreatePartmanParent generates a SELECT partman.create_parent() call to
+// register a table with pg_partman for automatic partition management.
+func CreatePartmanParent(schemaName, tableName, column, interval string, premake int) string {
+	qualified := QualifiedName(schemaName, tableName)
+	escapedQualified := strings.ReplaceAll(qualified, "'", "''")
+	escapedColumn := strings.ReplaceAll(column, "'", "''")
+	escapedInterval := strings.ReplaceAll(interval, "'", "''")
+	return fmt.Sprintf(`SELECT partman.create_parent(
+  p_parent_table := '%s',
+  p_control := '%s',
+  p_interval := '%s',
+  p_premake := %d
+);`, escapedQualified, escapedColumn, escapedInterval, premake)
+}
+
+// UpdatePartmanConfig generates an UPDATE partman.part_config statement to
+// configure retention settings for a pg_partman-managed table.
+func UpdatePartmanConfig(schemaName, tableName, retention string, keepTable bool) string {
+	qualified := QualifiedName(schemaName, tableName)
+	escapedQualified := strings.ReplaceAll(qualified, "'", "''")
+	escapedRetention := strings.ReplaceAll(retention, "'", "''")
+	keepTableStr := "false"
+	if keepTable {
+		keepTableStr = "true"
+	}
+	return fmt.Sprintf(`UPDATE partman.part_config
+SET retention = '%s',
+    retention_keep_table = %s
+WHERE parent_table = '%s';`, escapedRetention, keepTableStr, escapedQualified)
 }
 
 // AlterTableOwner generates an ALTER TABLE ... OWNER TO statement.

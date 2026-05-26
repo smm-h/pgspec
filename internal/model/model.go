@@ -120,6 +120,7 @@ type FK struct {
 type Index struct {
 	Name      string            `json:"name"`
 	Columns   []string          `json:"columns"`
+	Desc      []bool            `json:"desc,omitempty"` // parallel to Columns; true if DESC
 	Method    string            `json:"method,omitempty"`
 	Opclasses map[string]string `json:"opclasses,omitempty"`
 	Where     string            `json:"where,omitempty"`
@@ -152,6 +153,8 @@ type Enum struct {
 type PartitionSpec struct {
 	Strategy string          `json:"strategy"`
 	Column   string          `json:"column"`
+	Name     string          `json:"name,omitempty"`  // child partition table name
+	Bound    string          `json:"bound,omitempty"` // bound expression, e.g. "FROM ('2024-01-01') TO ('2024-02-01')"
 	Children []PartitionSpec `json:"children"`
 }
 

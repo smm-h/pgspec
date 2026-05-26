@@ -89,7 +89,7 @@ func Export(schema *model.Schema) ([]byte, error) {
 		for _, idx := range t.Indexes {
 			b.WriteByte('\n')
 			b.WriteString(fmt.Sprintf("[tables.%s.indexes.%s]\n", t.Name, idx.Name))
-			b.WriteString(fmt.Sprintf("columns = %s\n", tomlStringArray(idx.Columns)))
+			b.WriteString(fmt.Sprintf("columns = %s\n", tomlStringArray(indexColumnsWithDir(idx.Columns, idx.Desc))))
 			if idx.Method != "" && idx.Method != "btree" {
 				b.WriteString(fmt.Sprintf("method = %s\n", quoteTOML(idx.Method)))
 			}
@@ -180,4 +180,18 @@ func tomlStringArray(ss []string) string {
 		parts[i] = quoteTOML(s)
 	}
 	return "[" + strings.Join(parts, ", ") + "]"
+}
+
+// indexColumnsWithDir returns column strings with " DESC" appended for
+// columns that have desc=true. ASC columns are returned bare (PostgreSQL default).
+func indexColumnsWithDir(columns []string, desc []bool) []string {
+	result := make([]string, len(columns))
+	for i, col := range columns {
+		if i < len(desc) && desc[i] {
+			result[i] = col + " DESC"
+		} else {
+			result[i] = col
+		}
+	}
+	return result
 }
