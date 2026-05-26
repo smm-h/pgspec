@@ -611,6 +611,138 @@ func TestDisabledRules(t *testing.T) {
 	}
 }
 
+func TestE204_RefColumnNotFound(t *testing.T) {
+	schema := &model.Schema{
+		Tables: []model.Table{
+			{
+				Name:    "orders",
+				Schema:  "public",
+				Comment: "Orders table",
+				PK:      []string{"id"},
+				Columns: []model.Column{
+					{Name: "id", PGType: "uuid"},
+					{Name: "user_id", PGType: "uuid"},
+					{Name: "created_at", PGType: "timestamptz"},
+				},
+				FKs: []model.FK{{
+					Name:       "fk_user",
+					Columns:    []string{"user_id"},
+					RefSchema:  "public",
+					RefTable:   "users",
+					RefColumns: []string{"nonexistent_col"},
+					OnDelete:   "cascade",
+				}},
+				Indexes: []model.Index{{
+					Name:    "idx_orders_user_id",
+					Columns: []string{"user_id"},
+				}},
+			},
+			{
+				Name:    "users",
+				Schema:  "public",
+				Comment: "Users table",
+				PK:      []string{"id"},
+				Columns: []model.Column{
+					{Name: "id", PGType: "uuid"},
+					{Name: "created_at", PGType: "timestamptz"},
+				},
+			},
+		},
+	}
+
+	diags := Validate(schema, nil)
+	found := findByCode(diags, "E204")
+	if len(found) == 0 {
+		t.Fatal("expected E204 for FK referencing nonexistent column in referenced table")
+	}
+	if found[0].Table != "orders" {
+		t.Errorf("expected table 'orders', got %q", found[0].Table)
+	}
+}
+
+func TestE204_RefColumnExists_NoDiag(t *testing.T) {
+	schema := &model.Schema{
+		Tables: []model.Table{
+			{
+				Name:    "orders",
+				Schema:  "public",
+				Comment: "Orders table",
+				PK:      []string{"id"},
+				Columns: []model.Column{
+					{Name: "id", PGType: "uuid"},
+					{Name: "user_id", PGType: "uuid"},
+					{Name: "created_at", PGType: "timestamptz"},
+				},
+				FKs: []model.FK{{
+					Name:       "fk_user",
+					Columns:    []string{"user_id"},
+					RefSchema:  "public",
+					RefTable:   "users",
+					RefColumns: []string{"id"},
+					OnDelete:   "cascade",
+				}},
+				Indexes: []model.Index{{
+					Name:    "idx_orders_user_id",
+					Columns: []string{"user_id"},
+				}},
+			},
+			{
+				Name:    "users",
+				Schema:  "public",
+				Comment: "Users table",
+				PK:      []string{"id"},
+				Columns: []model.Column{
+					{Name: "id", PGType: "uuid"},
+					{Name: "created_at", PGType: "timestamptz"},
+				},
+			},
+		},
+	}
+
+	diags := Validate(schema, nil)
+	found := findByCode(diags, "E204")
+	if len(found) > 0 {
+		t.Fatalf("expected no E204 when FK references an existing column, got %v", found)
+	}
+}
+
+func TestE211_IndexNamingViolation(t *testing.T) {
+	schema := &model.Schema{
+		Tables: []model.Table{{
+			Name:    "users",
+			Schema:  "public",
+			Comment: "Users table",
+			PK:      []string{"id"},
+			Columns: []model.Column{
+				{Name: "id", PGType: "uuid"},
+				{Name: "email", PGType: "text"},
+				{Name: "created_at", PGType: "timestamptz"},
+			},
+			Indexes: []model.Index{{
+				Name:    "IdxUsersEmail",
+				Columns: []string{"email"},
+			}},
+		}},
+	}
+
+	diags := Validate(schema, nil)
+	found := findByCode(diags, "E211")
+	if len(found) == 0 {
+		t.Fatal("expected E211 for non-snake_case index name")
+	}
+	// Verify it's the index-specific diagnostic.
+	indexDiag := false
+	for _, d := range found {
+		if d.Table == "users" && d.Message == `index name "IdxUsersEmail" violates naming convention (snake_case)` {
+			indexDiag = true
+			break
+		}
+	}
+	if !indexDiag {
+		t.Errorf("expected E211 diagnostic about index name, got %v", found)
+	}
+}
+
 // --- Helpers ---
 
 func findByCode(diags []diagnostic.Diagnostic, code string) []diagnostic.Diagnostic {

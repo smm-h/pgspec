@@ -163,18 +163,38 @@ func checkTableMissingPK(schema *model.Schema, _ *Config) []diagnostic.Diagnosti
 	return diags
 }
 
-// checkFKRefNotFound (E204): FK references a table that doesn't exist in schema.
+// checkFKRefNotFound (E204): FK references a table or column that doesn't exist in schema.
 func checkFKRefNotFound(schema *model.Schema, _ *Config) []diagnostic.Diagnostic {
 	var diags []diagnostic.Diagnostic
 	for _, t := range schema.Tables {
 		for _, fk := range t.FKs {
-			if schema.TableByName(fk.RefSchema, fk.RefTable) == nil {
+			refTable := schema.TableByName(fk.RefSchema, fk.RefTable)
+			if refTable == nil {
 				diags = append(diags, diagnostic.Diagnostic{
 					Severity: diagnostic.Error,
 					Code:     "E204",
 					Table:    t.Name,
 					Message:  "FK " + fk.Name + " references non-existent table " + fk.RefSchema + "." + fk.RefTable,
 				})
+				continue
+			}
+			// Table exists; check that each referenced column exists in it.
+			for _, refCol := range fk.RefColumns {
+				found := false
+				for _, col := range refTable.Columns {
+					if col.Name == refCol {
+						found = true
+						break
+					}
+				}
+				if !found {
+					diags = append(diags, diagnostic.Diagnostic{
+						Severity: diagnostic.Error,
+						Code:     "E204",
+						Table:    t.Name,
+						Message:  fmt.Sprintf("FK %q references column %q which does not exist in table %q", fk.Name, refCol, fk.RefTable),
+					})
+				}
 			}
 		}
 	}
@@ -337,6 +357,16 @@ func checkNamingConvention(schema *model.Schema, config *Config) []diagnostic.Di
 					Table:    t.Name,
 					Column:   col.Name,
 					Message:  "column name \"" + col.Name + "\" violates naming convention (snake_case)",
+				})
+			}
+		}
+		for _, idx := range t.Indexes {
+			if !pattern.MatchString(idx.Name) {
+				diags = append(diags, diagnostic.Diagnostic{
+					Severity: diagnostic.Error,
+					Code:     "E211",
+					Table:    t.Name,
+					Message:  "index name \"" + idx.Name + "\" violates naming convention (snake_case)",
 				})
 			}
 		}
