@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/smm-h/pgdesign/internal/audit"
+	"github.com/smm-h/pgdesign/internal/codegen"
 	"github.com/smm-h/pgdesign/internal/config"
 	"github.com/smm-h/pgdesign/internal/diagnostic"
 	"github.com/smm-h/pgdesign/internal/diff"
@@ -121,6 +122,14 @@ func main() {
 
 	ext := app.Group("extension", "Extension management commands")
 	ext.Command("discover", "Discover extensions from a live database", handleExtensionDiscover)
+
+	app.Command("codegen", "Generate application code from schema policies", handleCodegen,
+		strictcli.WithArgs(strictcli.NewArg("path", "Path(s) to schema file(s) or directory", strictcli.Variadic())),
+		strictcli.WithFlags(
+			strictcli.StringFlag("lang", "Target language", strictcli.Choices("python")),
+			strictcli.StringFlag("output", "Output file path (default: stdout)", strictcli.Default(nil)),
+		),
+	)
 
 	app.Run()
 }
@@ -1447,6 +1456,45 @@ func quotedList(items []string) string {
 		quoted[i] = fmt.Sprintf("%q", s)
 	}
 	return strings.Join(quoted, ", ")
+}
+
+func handleCodegen(kwargs map[string]interface{}) int {
+	paths := extractPaths(kwargs)
+	schema, exitCode := parseAndBuild(paths)
+	if exitCode != 0 {
+		return exitCode
+	}
+
+	lang := kwargs["lang"].(string)
+
+	var gen codegen.Generator
+	switch lang {
+	case "python":
+		gen = &codegen.PythonGenerator{}
+	default:
+		fmt.Fprintf(os.Stderr, "error: unsupported language: %s\n", lang)
+		return 1
+	}
+
+	out, err := gen.Generate(schema)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: codegen failed: %v\n", err)
+		return 1
+	}
+
+	if outputPath, ok := kwargs["output"].(string); ok && outputPath != "" {
+		if err := os.WriteFile(outputPath, out, 0o644); err != nil {
+			fmt.Fprintf(os.Stderr, "error: cannot write output file: %v\n", err)
+			return 1
+		}
+		if !kwargs["quiet"].(bool) {
+			fmt.Fprintf(os.Stderr, "Generated %s (%d bytes)\n", outputPath, len(out))
+		}
+	} else {
+		fmt.Print(string(out))
+	}
+
+	return 0
 }
 
 func notImplemented(_ map[string]interface{}) int {
