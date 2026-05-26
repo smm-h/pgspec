@@ -44,11 +44,21 @@ func FormatTerminal(d *SchemaDiff) string {
 	}
 	for _, ec := range d.EnumsChanged {
 		fmt.Fprintf(&b, "%s~ enum %s%s\n", colorYellow, ec.Name, colorReset)
-		for _, v := range ec.ValuesAdded {
-			fmt.Fprintf(&b, "  %s+ %s%s\n", colorGreen, v, colorReset)
+		for _, v := range ec.ValuesAddedAtEnd {
+			fmt.Fprintf(&b, "  %s+ %s (safe, appended)%s\n", colorGreen, v, colorReset)
+		}
+		for _, ins := range ec.ValuesInserted {
+			if ins.After == "" {
+				fmt.Fprintf(&b, "  %s+ %s (before first value, requires BEFORE/AFTER)%s\n", colorYellow, ins.Value, colorReset)
+			} else {
+				fmt.Fprintf(&b, "  %s+ %s (after %q, requires BEFORE/AFTER)%s\n", colorYellow, ins.Value, ins.After, colorReset)
+			}
 		}
 		for _, v := range ec.ValuesRemoved {
 			fmt.Fprintf(&b, "  %s- %s%s\n", colorRed, v, colorReset)
+		}
+		if ec.Reordered {
+			fmt.Fprintf(&b, "  %s~ values reordered (dangerous)%s\n", colorRed, colorReset)
 		}
 	}
 
@@ -141,6 +151,24 @@ func formatTableDiff(b *strings.Builder, td *TableDiff) {
 	}
 	for _, name := range td.ChecksRemoved {
 		fmt.Fprintf(b, "  %s- check %s%s\n", colorRed, name, colorReset)
+	}
+
+	// Partitioning
+	if pd := td.PartitioningChanged; pd != nil {
+		if pd.StrategyChanged != nil {
+			fmt.Fprintf(b, "  %s~ partitioning: %q -> %q%s\n", colorYellow,
+				pd.StrategyChanged[0], pd.StrategyChanged[1], colorReset)
+		}
+		if pd.KeyChanged != nil {
+			fmt.Fprintf(b, "  %s~ partition key: %q -> %q%s\n", colorYellow,
+				pd.KeyChanged[0], pd.KeyChanged[1], colorReset)
+		}
+		for _, name := range td.PartitioningChanged.ChildrenAdded {
+			fmt.Fprintf(b, "  %s+ partition: %s%s\n", colorGreen, name, colorReset)
+		}
+		for _, name := range td.PartitioningChanged.ChildrenRemoved {
+			fmt.Fprintf(b, "  %s- partition: %s%s\n", colorRed, name, colorReset)
+		}
 	}
 }
 

@@ -40,9 +40,10 @@ type TableDiff struct {
 	UniquesRemoved []string                 `json:"uniques_removed"`
 	ChecksAdded    []model.CheckConstraint  `json:"checks_added"`
 	ChecksRemoved  []string                 `json:"checks_removed"`
-	CommentChanged *[2]string               `json:"comment_changed"` // [old, new]
-	PKChanged      *[2][]string             `json:"pk_changed"`      // [old, new]
-	OwnerChanged   *[2]string               `json:"owner_changed"`
+	CommentChanged      *[2]string               `json:"comment_changed"`                // [old, new]
+	PKChanged           *[2][]string             `json:"pk_changed"`                     // [old, new]
+	OwnerChanged        *[2]string               `json:"owner_changed"`
+	PartitioningChanged *PartitionDiff           `json:"partitioning_changed,omitempty"`
 }
 
 // ColumnChange describes a change to a single column, with risk classification.
@@ -62,6 +63,18 @@ type EnumDiff struct {
 	Name          string   `json:"name"`
 	ValuesAdded   []string `json:"values_added"`
 	ValuesRemoved []string `json:"values_removed"`
+
+	// Position-aware fields.
+	ValuesAddedAtEnd []string          `json:"values_added_at_end,omitempty"`
+	ValuesInserted   []EnumValueInsert `json:"values_inserted,omitempty"`
+	Reordered        bool              `json:"reordered,omitempty"`
+}
+
+// EnumValueInsert describes an enum value inserted in the middle of an existing
+// enum, requiring BEFORE/AFTER syntax in ALTER TYPE.
+type EnumValueInsert struct {
+	Value string `json:"value"`
+	After string `json:"after"` // the existing value it should go after
 }
 
 // FKChange describes a changed foreign key constraint.
@@ -76,6 +89,14 @@ type IndexChange struct {
 	Name string      `json:"name"`
 	Old  model.Index `json:"old"`
 	New  model.Index `json:"new"`
+}
+
+// PartitionDiff describes changes to a table's partitioning configuration.
+type PartitionDiff struct {
+	StrategyChanged *[2]string `json:"strategy_changed,omitempty"`
+	KeyChanged      *[2]string `json:"key_changed,omitempty"`
+	ChildrenAdded   []string   `json:"children_added,omitempty"`
+	ChildrenRemoved []string   `json:"children_removed,omitempty"`
 }
 
 // IsEmpty returns true if the diff contains no changes.
@@ -214,6 +235,9 @@ func diffTable(desired, actual *model.Table) TableDiff {
 		td.OwnerChanged = &[2]string{actual.Owner, desired.Owner}
 	}
 
+	// Partitioning
+	diffPartitioning(&td, desired, actual)
+
 	return td
 }
 
@@ -233,7 +257,8 @@ func isTableDiffEmpty(td *TableDiff) bool {
 		len(td.ChecksRemoved) == 0 &&
 		td.CommentChanged == nil &&
 		td.PKChanged == nil &&
-		td.OwnerChanged == nil
+		td.OwnerChanged == nil &&
+		td.PartitioningChanged == nil
 }
 
 // diffColumns matches columns by name and classifies changes with risk.
@@ -514,10 +539,30 @@ func diffIndexes(td *TableDiff, desired, actual *model.Table) {
 func indexEqual(a, b *model.Index) bool {
 	return a.Name == b.Name &&
 		sliceEqual(a.Columns, b.Columns) &&
+		boolSliceEqual(a.Desc, b.Desc) &&
 		a.Method == b.Method &&
 		mapEqual(a.Opclasses, b.Opclasses) &&
 		a.Where == b.Where &&
 		sliceEqual(a.Include, b.Include)
+}
+
+// boolSliceEqual returns true if two bool slices represent the same sort
+// directions. nil and all-false are treated as equivalent (both mean all ASC).
+func boolSliceEqual(a, b []bool) bool {
+	aLen := len(a)
+	bLen := len(b)
+	maxLen := aLen
+	if bLen > maxLen {
+		maxLen = bLen
+	}
+	for i := 0; i < maxLen; i++ {
+		av := i < aLen && a[i]
+		bv := i < bLen && b[i]
+		if av != bv {
+			return false
+		}
+	}
+	return true
 }
 
 // mapEqual returns true if two string maps are equal.
@@ -595,6 +640,86 @@ func diffChecks(td *TableDiff, desired, actual *model.Table) {
 	}
 }
 
+// diffPartitioning compares partitioning configuration between two tables.
+func diffPartitioning(td *TableDiff, desired, actual *model.Table) {
+	dp := desired.Partitioning
+	ap := actual.Partitioning
+
+	// Both nil: no partitioning on either side.
+	if dp == nil && ap == nil {
+		return
+	}
+
+	pd := &PartitionDiff{}
+	changed := false
+
+	// Determine strategies (empty string for unpartitioned).
+	desiredStrategy := ""
+	actualStrategy := ""
+	if dp != nil {
+		desiredStrategy = dp.Strategy
+	}
+	if ap != nil {
+		actualStrategy = ap.Strategy
+	}
+
+	if desiredStrategy != actualStrategy {
+		pd.StrategyChanged = &[2]string{actualStrategy, desiredStrategy}
+		changed = true
+	}
+
+	// Determine partition keys.
+	desiredKey := ""
+	actualKey := ""
+	if dp != nil {
+		desiredKey = dp.Column
+	}
+	if ap != nil {
+		actualKey = ap.Column
+	}
+
+	if desiredKey != actualKey {
+		pd.KeyChanged = &[2]string{actualKey, desiredKey}
+		changed = true
+	}
+
+	// Compare first-level children by name.
+	var desiredChildren []string
+	var actualChildren []string
+	if dp != nil {
+		for _, child := range dp.Children {
+			desiredChildren = append(desiredChildren, partitionChildKey(&child))
+		}
+	}
+	if ap != nil {
+		for _, child := range ap.Children {
+			actualChildren = append(actualChildren, partitionChildKey(&child))
+		}
+	}
+
+	pd.ChildrenAdded = stringDiff(desiredChildren, actualChildren)
+	pd.ChildrenRemoved = stringDiff(actualChildren, desiredChildren)
+	if len(pd.ChildrenAdded) > 0 || len(pd.ChildrenRemoved) > 0 {
+		changed = true
+	}
+
+	if changed {
+		td.PartitioningChanged = pd
+	}
+}
+
+// partitionChildKey returns an identifier for a partition child.
+// Combines Strategy and Column to form a unique key for the child partition.
+func partitionChildKey(ps *model.PartitionSpec) string {
+	if ps.Strategy != "" && ps.Column != "" {
+		return ps.Strategy + ":" + ps.Column
+	}
+	if ps.Strategy != "" {
+		return ps.Strategy
+	}
+	return ps.Column
+}
+
 // diffEnums matches enums by schema-qualified name.
 func diffEnums(d *SchemaDiff, desired, actual *model.Schema) {
 	actualByKey := make(map[string]*model.Enum, len(actual.Enums))
@@ -637,19 +762,107 @@ func enumKey(e *model.Enum) string {
 }
 
 // diffEnum compares two matched enums and returns nil if identical.
+// It performs position-aware comparison to distinguish safe appends from
+// middle insertions and detect reordering.
 func diffEnum(desired, actual *model.Enum) *EnumDiff {
 	added := stringDiff(desired.Values, actual.Values)
 	removed := stringDiff(actual.Values, desired.Values)
+	reordered := enumReordered(desired.Values, actual.Values)
 
-	if len(added) == 0 && len(removed) == 0 {
+	if len(added) == 0 && len(removed) == 0 && !reordered {
 		return nil
 	}
 
-	return &EnumDiff{
+	ed := &EnumDiff{
 		Name:          enumKey(desired),
 		ValuesAdded:   added,
 		ValuesRemoved: removed,
+		Reordered:     reordered,
 	}
+
+	// Classify added values as appended-at-end vs inserted-in-middle.
+	if len(added) > 0 {
+		classifyEnumInsertions(ed, desired.Values, actual.Values)
+	}
+
+	return ed
+}
+
+// classifyEnumInsertions splits added values into safe appends (at end) and
+// middle insertions (requiring BEFORE/AFTER). A new value is "appended at end"
+// if it appears after all old values in the desired list. Otherwise it is
+// inserted in the middle and we record which existing value it follows.
+func classifyEnumInsertions(ed *EnumDiff, desired, actual []string) {
+	oldSet := make(map[string]bool, len(actual))
+	for _, v := range actual {
+		oldSet[v] = true
+	}
+
+	// Find the index of the last old value in the desired list.
+	lastOldIdx := -1
+	for i, v := range desired {
+		if oldSet[v] {
+			lastOldIdx = i
+		}
+	}
+
+	addedSet := make(map[string]bool, len(ed.ValuesAdded))
+	for _, v := range ed.ValuesAdded {
+		addedSet[v] = true
+	}
+
+	for i, v := range desired {
+		if !addedSet[v] {
+			continue
+		}
+		if i > lastOldIdx {
+			// This new value appears after all existing values.
+			ed.ValuesAddedAtEnd = append(ed.ValuesAddedAtEnd, v)
+		} else {
+			// Inserted in the middle. Find the nearest preceding value
+			// that exists in the old enum (the AFTER neighbor).
+			after := ""
+			for j := i - 1; j >= 0; j-- {
+				if oldSet[desired[j]] {
+					after = desired[j]
+					break
+				}
+			}
+			ed.ValuesInserted = append(ed.ValuesInserted, EnumValueInsert{
+				Value: v,
+				After: after, // empty string means "before the first old value"
+			})
+		}
+	}
+}
+
+// enumReordered returns true if values present in both old and new lists have
+// a different relative order. It extracts the common subsequence from each
+// list and checks whether the orderings match.
+func enumReordered(desired, actual []string) bool {
+	oldSet := make(map[string]bool, len(actual))
+	for _, v := range actual {
+		oldSet[v] = true
+	}
+	newSet := make(map[string]bool, len(desired))
+	for _, v := range desired {
+		newSet[v] = true
+	}
+
+	// Extract values common to both, in the order they appear in each list.
+	var commonInOld, commonInNew []string
+	for _, v := range actual {
+		if newSet[v] {
+			commonInOld = append(commonInOld, v)
+		}
+	}
+	for _, v := range desired {
+		if oldSet[v] {
+			commonInNew = append(commonInNew, v)
+		}
+	}
+
+	return !sliceEqual(commonInOld, commonInNew)
 }
 
 // diffExtensions compares extension lists.

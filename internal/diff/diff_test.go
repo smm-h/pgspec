@@ -830,3 +830,269 @@ func TestGeneratedAndIdentityUnchanged(t *testing.T) {
 		t.Errorf("expected empty diff when generated and identity are unchanged, got: %s", d.Summary())
 	}
 }
+
+func TestEnumValueAppendedAtEnd(t *testing.T) {
+	desired := &model.Schema{
+		Enums: []model.Enum{
+			{Name: "status", Values: []string{"active", "inactive", "suspended"}},
+		},
+	}
+	actual := &model.Schema{
+		Enums: []model.Enum{
+			{Name: "status", Values: []string{"active", "inactive"}},
+		},
+	}
+	d := Diff(desired, actual)
+	if len(d.EnumsChanged) != 1 {
+		t.Fatalf("expected 1 enum changed, got %d", len(d.EnumsChanged))
+	}
+	ec := d.EnumsChanged[0]
+
+	// Backward compat: ValuesAdded still populated.
+	if len(ec.ValuesAdded) != 1 || ec.ValuesAdded[0] != "suspended" {
+		t.Errorf("expected ValuesAdded=[suspended], got %v", ec.ValuesAdded)
+	}
+
+	// Position-aware: appended at end.
+	if len(ec.ValuesAddedAtEnd) != 1 || ec.ValuesAddedAtEnd[0] != "suspended" {
+		t.Errorf("expected ValuesAddedAtEnd=[suspended], got %v", ec.ValuesAddedAtEnd)
+	}
+	if len(ec.ValuesInserted) != 0 {
+		t.Errorf("expected no ValuesInserted, got %v", ec.ValuesInserted)
+	}
+	if ec.Reordered {
+		t.Error("expected Reordered=false")
+	}
+}
+
+func TestEnumValueInsertedInMiddle(t *testing.T) {
+	desired := &model.Schema{
+		Enums: []model.Enum{
+			{Name: "status", Values: []string{"active", "pending", "inactive"}},
+		},
+	}
+	actual := &model.Schema{
+		Enums: []model.Enum{
+			{Name: "status", Values: []string{"active", "inactive"}},
+		},
+	}
+	d := Diff(desired, actual)
+	if len(d.EnumsChanged) != 1 {
+		t.Fatalf("expected 1 enum changed, got %d", len(d.EnumsChanged))
+	}
+	ec := d.EnumsChanged[0]
+
+	// Backward compat.
+	if len(ec.ValuesAdded) != 1 || ec.ValuesAdded[0] != "pending" {
+		t.Errorf("expected ValuesAdded=[pending], got %v", ec.ValuesAdded)
+	}
+
+	// Position-aware: inserted in middle.
+	if len(ec.ValuesAddedAtEnd) != 0 {
+		t.Errorf("expected no ValuesAddedAtEnd, got %v", ec.ValuesAddedAtEnd)
+	}
+	if len(ec.ValuesInserted) != 1 {
+		t.Fatalf("expected 1 ValuesInserted, got %d", len(ec.ValuesInserted))
+	}
+	ins := ec.ValuesInserted[0]
+	if ins.Value != "pending" {
+		t.Errorf("expected inserted Value=pending, got %q", ins.Value)
+	}
+	if ins.After != "active" {
+		t.Errorf("expected After=active, got %q", ins.After)
+	}
+	if ec.Reordered {
+		t.Error("expected Reordered=false")
+	}
+}
+
+func TestEnumValueInsertedBeforeFirst(t *testing.T) {
+	desired := &model.Schema{
+		Enums: []model.Enum{
+			{Name: "status", Values: []string{"draft", "active", "inactive"}},
+		},
+	}
+	actual := &model.Schema{
+		Enums: []model.Enum{
+			{Name: "status", Values: []string{"active", "inactive"}},
+		},
+	}
+	d := Diff(desired, actual)
+	ec := d.EnumsChanged[0]
+
+	if len(ec.ValuesInserted) != 1 {
+		t.Fatalf("expected 1 ValuesInserted, got %d", len(ec.ValuesInserted))
+	}
+	ins := ec.ValuesInserted[0]
+	if ins.Value != "draft" {
+		t.Errorf("expected inserted Value=draft, got %q", ins.Value)
+	}
+	if ins.After != "" {
+		t.Errorf("expected After=\"\" (before first), got %q", ins.After)
+	}
+}
+
+func TestEnumValuesReordered(t *testing.T) {
+	desired := &model.Schema{
+		Enums: []model.Enum{
+			{Name: "status", Values: []string{"inactive", "active"}},
+		},
+	}
+	actual := &model.Schema{
+		Enums: []model.Enum{
+			{Name: "status", Values: []string{"active", "inactive"}},
+		},
+	}
+	d := Diff(desired, actual)
+	if len(d.EnumsChanged) != 1 {
+		t.Fatalf("expected 1 enum changed, got %d", len(d.EnumsChanged))
+	}
+	ec := d.EnumsChanged[0]
+
+	// No additions or removals.
+	if len(ec.ValuesAdded) != 0 {
+		t.Errorf("expected no ValuesAdded, got %v", ec.ValuesAdded)
+	}
+	if len(ec.ValuesRemoved) != 0 {
+		t.Errorf("expected no ValuesRemoved, got %v", ec.ValuesRemoved)
+	}
+	if !ec.Reordered {
+		t.Error("expected Reordered=true")
+	}
+}
+
+func TestEnumValueRemovedStillPopulated(t *testing.T) {
+	desired := &model.Schema{
+		Enums: []model.Enum{
+			{Name: "status", Values: []string{"active"}},
+		},
+	}
+	actual := &model.Schema{
+		Enums: []model.Enum{
+			{Name: "status", Values: []string{"active", "inactive"}},
+		},
+	}
+	d := Diff(desired, actual)
+	ec := d.EnumsChanged[0]
+
+	if len(ec.ValuesRemoved) != 1 || ec.ValuesRemoved[0] != "inactive" {
+		t.Errorf("expected ValuesRemoved=[inactive], got %v", ec.ValuesRemoved)
+	}
+	if len(ec.ValuesAddedAtEnd) != 0 {
+		t.Errorf("expected no ValuesAddedAtEnd, got %v", ec.ValuesAddedAtEnd)
+	}
+	if len(ec.ValuesInserted) != 0 {
+		t.Errorf("expected no ValuesInserted, got %v", ec.ValuesInserted)
+	}
+	if ec.Reordered {
+		t.Error("expected Reordered=false")
+	}
+}
+
+func TestEnumMixedInsertAndAppend(t *testing.T) {
+	// Old: [a, c]
+	// New: [a, b, c, d]
+	// "b" is inserted (after "a"), "d" is appended at end.
+	desired := &model.Schema{
+		Enums: []model.Enum{
+			{Name: "status", Values: []string{"a", "b", "c", "d"}},
+		},
+	}
+	actual := &model.Schema{
+		Enums: []model.Enum{
+			{Name: "status", Values: []string{"a", "c"}},
+		},
+	}
+	d := Diff(desired, actual)
+	ec := d.EnumsChanged[0]
+
+	if len(ec.ValuesInserted) != 1 {
+		t.Fatalf("expected 1 ValuesInserted, got %d", len(ec.ValuesInserted))
+	}
+	if ec.ValuesInserted[0].Value != "b" || ec.ValuesInserted[0].After != "a" {
+		t.Errorf("expected inserted b after a, got %+v", ec.ValuesInserted[0])
+	}
+	if len(ec.ValuesAddedAtEnd) != 1 || ec.ValuesAddedAtEnd[0] != "d" {
+		t.Errorf("expected ValuesAddedAtEnd=[d], got %v", ec.ValuesAddedAtEnd)
+	}
+	if ec.Reordered {
+		t.Error("expected Reordered=false")
+	}
+}
+
+func TestEnumReorderedWithAdditions(t *testing.T) {
+	// Old: [a, b, c]
+	// New: [c, b, a, d]
+	// Reordered (a,b,c -> c,b,a) and d appended.
+	desired := &model.Schema{
+		Enums: []model.Enum{
+			{Name: "status", Values: []string{"c", "b", "a", "d"}},
+		},
+	}
+	actual := &model.Schema{
+		Enums: []model.Enum{
+			{Name: "status", Values: []string{"a", "b", "c"}},
+		},
+	}
+	d := Diff(desired, actual)
+	ec := d.EnumsChanged[0]
+
+	if !ec.Reordered {
+		t.Error("expected Reordered=true")
+	}
+	if len(ec.ValuesAdded) != 1 || ec.ValuesAdded[0] != "d" {
+		t.Errorf("expected ValuesAdded=[d], got %v", ec.ValuesAdded)
+	}
+}
+
+func TestEnumFormatTerminalAppended(t *testing.T) {
+	d := &SchemaDiff{
+		EnumsChanged: []EnumDiff{
+			{
+				Name:             "status",
+				ValuesAdded:      []string{"suspended"},
+				ValuesAddedAtEnd: []string{"suspended"},
+			},
+		},
+	}
+	out := FormatTerminal(d)
+	if !strings.Contains(out, "safe, appended") {
+		t.Errorf("expected 'safe, appended' in output, got:\n%s", out)
+	}
+}
+
+func TestEnumFormatTerminalInserted(t *testing.T) {
+	d := &SchemaDiff{
+		EnumsChanged: []EnumDiff{
+			{
+				Name:        "status",
+				ValuesAdded: []string{"pending"},
+				ValuesInserted: []EnumValueInsert{
+					{Value: "pending", After: "active"},
+				},
+			},
+		},
+	}
+	out := FormatTerminal(d)
+	if !strings.Contains(out, "requires BEFORE/AFTER") {
+		t.Errorf("expected 'requires BEFORE/AFTER' in output, got:\n%s", out)
+	}
+	if !strings.Contains(out, `after "active"`) {
+		t.Errorf("expected 'after \"active\"' in output, got:\n%s", out)
+	}
+}
+
+func TestEnumFormatTerminalReordered(t *testing.T) {
+	d := &SchemaDiff{
+		EnumsChanged: []EnumDiff{
+			{
+				Name:      "status",
+				Reordered: true,
+			},
+		},
+	}
+	out := FormatTerminal(d)
+	if !strings.Contains(out, "values reordered (dangerous)") {
+		t.Errorf("expected 'values reordered (dangerous)' in output, got:\n%s", out)
+	}
+}
