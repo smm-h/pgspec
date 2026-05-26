@@ -58,3 +58,53 @@ pgdesign stays Postgres-only. The downstream project continues managing SQLite s
 - Forward-only migrations (no rollback)
 - Python application, schema defined in Python strings today
 - Would benefit most from: TOML schema definition, validation, diagram generation, migration generation
+
+## Feasibility analysis (2026-05-25)
+
+### Engine-agnostic packages (work for SQLite as-is)
+
+- parse/ (TOML has nothing PG-specific)
+- model/ (generic schema IR)
+- format/ (operates on TOML)
+- audit/ (normal form analysis is pure math)
+- fd/ (functional dependency algorithms)
+- diff/ (compares two model.Schema instances)
+- D2 diagram generation
+
+### Packages needing parallel implementation
+
+| Package | Effort | Notes |
+|---------|--------|-------|
+| sql/ | Medium | Completely PG-specific. Need parallel sqlite/sql.go |
+| introspect/ | Medium | pg_catalog → sqlite_master + PRAGMAs. Complete rewrite. |
+| migrate/apply+rollback | Large | SQLite's ALTER TABLE is severely limited. Table rebuild pattern (CREATE new → COPY → DROP old → RENAME) is fundamentally different. |
+| migrate/sql_gen | Medium | All 24 op types need SQLite equivalents (many collapse into table rebuilds) |
+| risk/ | Small | PG lock types irrelevant. SQLite has file-level locks. |
+
+### Packages needing adaptation
+
+| Package | Effort | Notes |
+|---------|--------|-------|
+| semtype/ | Small | Type mapping: id→TEXT, money→INTEGER, timestamp→TEXT. Lossy. |
+| validate/ | Small | Filter out PG-specific rules (E207, E208, E209, E214). |
+| config/ | Trivial | Add engine field |
+| generate/ | Small | Dispatch to sqlite sql builder |
+| discover/ | Small | TANE is engine-agnostic; just needs row access |
+
+### Hard incompatibilities
+
+1. No schemas — multi-schema projects can't target SQLite
+2. 5 types vs ~100 — semantic type mapping is lossy
+3. Table rebuild for migrations — single biggest engineering challenge
+4. No advisory locks — needs file lock mechanism
+5. No extensions — extregistry irrelevant
+
+### Incremental path
+
+1. engine in config → SQLite type mapping → SQLite DDL generation (Option B, ~1 week)
+2. SQLite introspection via PRAGMAs (~3 days)
+3. SQLite migration engine with table rebuild (~2 weeks, where 60% of effort concentrates)
+
+### Decision
+
+Deferred. The incremental path (Option B first, then A) is viable but not a priority right now.
