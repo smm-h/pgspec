@@ -4,6 +4,7 @@ package diagnostic
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -79,15 +80,38 @@ func (d Diagnostics) Warnings() Diagnostics {
 }
 
 // RenderTerminal renders diagnostics as human-readable terminal output.
+// Diagnostics are sorted by file (alphabetical), then by severity
+// (Error > Warning > Info > Hint) within each file group.
 // When color is true, ANSI escape codes are used.
 func RenderTerminal(diags Diagnostics, color bool) string {
 	if len(diags) == 0 {
 		return ""
 	}
 
+	// Sort a copy so we don't modify the caller's slice.
+	sorted := make(Diagnostics, len(diags))
+	copy(sorted, diags)
+	sort.SliceStable(sorted, func(i, j int) bool {
+		if sorted[i].File != sorted[j].File {
+			return sorted[i].File < sorted[j].File
+		}
+		return sorted[i].Severity < sorted[j].Severity
+	})
+
 	var b strings.Builder
-	for i, diag := range diags {
-		if i > 0 {
+	currentFile := ""
+	for i, diag := range sorted {
+		// Emit a file group header when the file changes.
+		if diag.File != currentFile {
+			if i > 0 {
+				b.WriteByte('\n')
+			}
+			currentFile = diag.File
+			if currentFile != "" {
+				b.WriteString(currentFile)
+				b.WriteByte('\n')
+			}
+		} else if i > 0 {
 			b.WriteByte('\n')
 		}
 

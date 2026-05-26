@@ -134,6 +134,94 @@ func TestRenderTerminal_Empty(t *testing.T) {
 	}
 }
 
+func TestRenderTerminal_GroupedBySeverityAndFile(t *testing.T) {
+	// Diagnostics in deliberately scrambled order: mixed files and severities.
+	diags := Diagnostics{
+		{Severity: Warning, Code: "W001", File: "schema.toml", Table: "orders", Message: "missing index on orders"},
+		{Severity: Error, Code: "E002", File: "types.toml", Message: "unknown type bigserial"},
+		{Severity: Hint, File: "schema.toml", Table: "users", Message: "consider adding a check constraint"},
+		{Severity: Error, Code: "E001", File: "schema.toml", Table: "users", Column: "email", Message: "column type is invalid"},
+		{Severity: Info, Code: "I001", File: "types.toml", Message: "type alias resolved"},
+		{Severity: Warning, Code: "W002", File: "types.toml", Message: "deprecated type used"},
+	}
+
+	// Verify the input slice is not mutated.
+	origFirst := diags[0]
+
+	output := RenderTerminal(diags, false)
+
+	if diags[0] != origFirst {
+		t.Fatal("RenderTerminal mutated the input slice")
+	}
+
+	// Expected order:
+	//   schema.toml group: Error (E001), Warning (W001), Hint
+	//   types.toml group:  Error (E002), Warning (W002), Info (I001)
+	lines := strings.Split(output, "\n")
+
+	// Collect non-empty, non-indented lines (headers + severity lines).
+	type entry struct {
+		line string
+		idx  int
+	}
+	var significant []entry
+	for i, l := range lines {
+		if l == "" || strings.HasPrefix(l, "  ") {
+			continue
+		}
+		significant = append(significant, entry{l, i})
+	}
+
+	// We expect: "schema.toml", error[E001], warning[W001], hint,
+	//            "types.toml", error[E002], warning[W002], info[I001]
+	expected := []string{
+		"schema.toml",
+		"error[E001]: column type is invalid",
+		"warning[W001]: missing index on orders",
+		"hint: consider adding a check constraint",
+		"types.toml",
+		"error[E002]: unknown type bigserial",
+		"warning[W002]: deprecated type used",
+		"info[I001]: type alias resolved",
+	}
+
+	if len(significant) != len(expected) {
+		t.Fatalf("expected %d significant lines, got %d\nOutput:\n%s\nSignificant:\n%v",
+			len(expected), len(significant), output, significant)
+	}
+
+	for i, want := range expected {
+		if significant[i].line != want {
+			t.Errorf("line %d: expected %q, got %q", i, want, significant[i].line)
+		}
+	}
+
+	// Verify file headers appear before their group's diagnostics.
+	schemaIdx := strings.Index(output, "schema.toml\n")
+	typesIdx := strings.Index(output, "types.toml\n")
+	if schemaIdx == -1 || typesIdx == -1 {
+		t.Fatal("expected file group headers in output")
+	}
+	if schemaIdx >= typesIdx {
+		t.Error("expected schema.toml group before types.toml group (alphabetical)")
+	}
+}
+
+func TestRenderTerminal_DoesNotMutateInput(t *testing.T) {
+	diags := Diagnostics{
+		{Severity: Warning, File: "b.toml", Message: "second"},
+		{Severity: Error, File: "a.toml", Message: "first"},
+	}
+	// Take a snapshot of the original order.
+	origCodes := []string{diags[0].File, diags[1].File}
+
+	RenderTerminal(diags, false)
+
+	if diags[0].File != origCodes[0] || diags[1].File != origCodes[1] {
+		t.Fatal("RenderTerminal mutated the input slice order")
+	}
+}
+
 func TestRenderJSON(t *testing.T) {
 	diags := Diagnostics{
 		{
