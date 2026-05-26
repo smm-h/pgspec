@@ -1,0 +1,1380 @@
+[meta]
+version = 1
+schema = "game"
+extensions = ["pg_partman"]
+
+# -- Scalar types for raw PG types --
+
+[types.text_field]
+kind = "scalar"
+base_type = "text"
+comment = "Generic text column"
+
+[types.text_nullable]
+kind = "scalar"
+base_type = "text"
+not_null = false
+comment = "Nullable text column"
+
+[types.text_ref]
+kind = "scalar"
+base_type = "text"
+comment = "Text foreign key referencing a text-based PK in another schema"
+
+[types.int]
+kind = "scalar"
+base_type = "integer"
+comment = "Integer column"
+
+[types.date_field]
+kind = "scalar"
+base_type = "date"
+comment = "Calendar date"
+
+[types.jsonb_nullable]
+kind = "scalar"
+base_type = "jsonb"
+not_null = false
+comment = "Nullable JSONB column"
+
+[types.timestamp_no_default]
+kind = "scalar"
+base_type = "timestamptz"
+comment = "NOT NULL timestamp without DEFAULT now() -- for columns that must be set explicitly"
+
+# -- Enum types --
+
+[types.friendship_status]
+kind = "enum"
+values = ["pending", "accepted", "blocked"]
+comment = "State of a friendship between two players"
+
+[types.generation_status]
+kind = "enum"
+values = ["pending", "running", "completed", "failed"]
+comment = "Status of an AI game generation job"
+
+[types.session_status]
+kind = "enum"
+values = ["waiting", "active", "finished"]
+comment = "Status of a multiplayer game session"
+
+[types.experiment_status]
+kind = "enum"
+values = ["draft", "active", "paused", "completed"]
+comment = "Lifecycle status of an A/B experiment"
+
+[types.report_status]
+kind = "enum"
+values = ["open", "reviewing", "resolved", "dismissed"]
+comment = "Status of a player-submitted report"
+
+[types.moderation_action_type]
+kind = "enum"
+values = ["warn", "mute", "ban", "unban", "delete_content"]
+comment = "Type of action a moderator can take"
+
+[types.report_target_type]
+kind = "enum"
+values = ["player", "game", "comment", "chat_message"]
+comment = "Entity type that a report targets"
+
+[types.session_role]
+kind = "enum"
+values = ["host", "player", "spectator"]
+comment = "Role of a participant in a game session"
+
+[types.currency_transaction_type]
+kind = "enum"
+values = ["earn", "spend", "refund", "grant", "revoke"]
+comment = "Type of virtual currency transaction"
+
+[types.notification_type]
+kind = "enum"
+values = ["friend_request", "game_like", "achievement", "moderation", "system"]
+comment = "Category of player notification"
+
+[types.server_type]
+kind = "enum"
+values = ["beta", "stable"]
+comment = "Server deployment tier"
+
+[types.server_status]
+kind = "enum"
+values = ["starting", "ready", "draining", "stopped"]
+comment = "Server lifecycle status"
+
+# ============================================================
+# EXISTING TABLES (from live database)
+# ============================================================
+
+# -- Players --
+
+[tables.players]
+comment = "Game-layer player identity. Links to auth.users via auth_id; anonymous players have auth_id NULL and is_anonymous true."
+
+[tables.players.columns.id]
+type = "id"
+
+[tables.players.columns.auth_id]
+type = "text_ref"
+nullable = true
+comment = "FK to auth.users; NULL for anonymous players"
+
+[tables.players.columns.name]
+type = "text_field"
+
+[tables.players.columns.display_name]
+type = "text_field"
+
+[tables.players.columns.is_anonymous]
+type = "flag"
+
+[tables.players.columns.created_at]
+type = "timestamp"
+
+[tables.players.columns.is_ai]
+type = "flag"
+comment = "Whether this player is an AI agent. Disclosed per EU AI Act Art. 52."
+
+[tables.players.columns.ai_model]
+type = "text_field"
+nullable = true
+comment = "AI model identifier (e.g. claude-opus-4-6). NULL for human players."
+
+[tables.players.fks.fk_players_auth]
+columns = ["auth_id"]
+ref_table = "auth.users"
+ref_columns = ["id"]
+on_delete = "SET NULL"
+
+[tables.players.unique.uq_players_auth_id]
+columns = ["auth_id"]
+
+[tables.players.checks.ck_players_ai_model_consistency]
+expr = "(is_ai = true AND ai_model IS NOT NULL) OR (is_ai = false AND ai_model IS NULL)"
+
+[tables.players.indexes.idx_players_auth_id]
+columns = ["auth_id"]
+where = "auth_id IS NOT NULL"
+
+[tables.players.indexes.idx_players_name]
+columns = ["name"]
+
+[tables.players.indexes.idx_players_is_ai]
+columns = ["is_ai"]
+
+# -- Friendships --
+
+[tables.friendships]
+comment = "Bidirectional friend relationships. player_a < player_b enforces canonical ordering to prevent duplicates."
+
+[tables.friendships.columns.id]
+type = "id"
+
+[tables.friendships.columns.player_a]
+type = "ref"
+
+[tables.friendships.columns.player_b]
+type = "ref"
+
+[tables.friendships.columns.status]
+type = "friendship_status"
+
+[tables.friendships.columns.initiated_by]
+type = "ref"
+
+[tables.friendships.columns.created_at]
+type = "timestamp"
+
+[tables.friendships.columns.updated_at]
+type = "timestamp"
+
+[tables.friendships.fks.fk_friendships_player_a]
+columns = ["player_a"]
+ref_table = "players"
+ref_columns = ["id"]
+on_delete = "CASCADE"
+
+[tables.friendships.fks.fk_friendships_player_b]
+columns = ["player_b"]
+ref_table = "players"
+ref_columns = ["id"]
+on_delete = "CASCADE"
+
+[tables.friendships.fks.fk_friendships_initiated_by]
+columns = ["initiated_by"]
+ref_table = "players"
+ref_columns = ["id"]
+on_delete = "CASCADE"
+
+[tables.friendships.checks.ck_friendships_no_self]
+expr = "player_a <> player_b"
+
+[tables.friendships.checks.ck_friendships_ordered]
+expr = "player_a < player_b"
+
+[tables.friendships.indexes.idx_friendships_pair]
+columns = ["player_a", "player_b"]
+unique = true
+
+[tables.friendships.indexes.idx_friendships_player_b]
+columns = ["player_b"]
+
+# -- Game Catalog --
+
+[tables.game_catalog]
+comment = "Game metadata registry. Game bundles live on filesystem; this stores discovery metadata only."
+
+[tables.game_catalog.columns.id]
+type = "id"
+
+[tables.game_catalog.columns.title]
+type = "text_field"
+
+[tables.game_catalog.columns.description]
+type = "text_field"
+nullable = true
+
+[tables.game_catalog.columns.tags]
+type = "json_array"
+
+[tables.game_catalog.columns.creator]
+type = "ref"
+nullable = true
+
+[tables.game_catalog.columns.ai_generated]
+type = "flag"
+
+[tables.game_catalog.columns.created_at]
+type = "timestamp"
+
+[tables.game_catalog.columns.generation_model]
+type = "text_field"
+nullable = true
+comment = "AI model that generated this game. NULL for human-created. Disclosed per EU AI Act Art. 50."
+
+[tables.game_catalog.columns.generation_prompt]
+type = "text_field"
+nullable = true
+comment = "Original prompt used to generate this game. Stored for transparency."
+
+[tables.game_catalog.fks.fk_game_catalog_creator]
+columns = ["creator"]
+ref_table = "players"
+ref_columns = ["id"]
+on_delete = "SET NULL"
+
+[tables.game_catalog.checks.ck_game_catalog_generation_consistency]
+expr = "(ai_generated = true AND generation_model IS NOT NULL) OR (ai_generated = false AND generation_model IS NULL AND generation_prompt IS NULL)"
+
+[tables.game_catalog.indexes.idx_game_catalog_created_at]
+columns = ["created_at DESC"]
+
+[tables.game_catalog.indexes.idx_game_catalog_creator]
+columns = ["creator"]
+where = "creator IS NOT NULL"
+
+[tables.game_catalog.indexes.idx_game_catalog_tags]
+columns = ["tags"]
+method = "gin"
+
+# -- Chat Messages (partitioned) --
+
+[tables.chat_messages]
+comment = "Player chat messages, partitioned by month. Retention: 90 days (drop old partitions via cron)."
+pk = ["id", "sent_at"]
+
+[tables.chat_messages.columns.id]
+type = "id"
+
+[tables.chat_messages.columns.sender_id]
+type = "ref"
+
+[tables.chat_messages.columns.channel]
+type = "text_field"
+
+[tables.chat_messages.columns.body]
+type = "text_field"
+
+[tables.chat_messages.columns.metadata]
+type = "jsonb_nullable"
+nullable = true
+
+[tables.chat_messages.columns.sent_at]
+type = "timestamp"
+
+[tables.chat_messages.fks.fk_chat_messages_sender]
+columns = ["sender_id"]
+ref_table = "players"
+ref_columns = ["id"]
+on_delete = "CASCADE"
+
+[tables.chat_messages.indexes.idx_chat_messages_channel_sent]
+columns = ["channel", "sent_at DESC"]
+
+[tables.chat_messages.indexes.idx_chat_messages_sender]
+columns = ["sender_id", "sent_at DESC"]
+
+[tables.chat_messages.partitioning]
+strategy = "range"
+column = "sent_at"
+
+[tables.chat_messages.maintenance]
+premake = 3
+retention = "90 days"
+
+# -- Platform Leaderboards --
+
+[tables.platform_leaderboards]
+comment = "Cross-game leaderboard entries. Each row is a score submission for a specific game."
+
+[tables.platform_leaderboards.columns.id]
+type = "id"
+
+[tables.platform_leaderboards.columns.game_id]
+type = "ref"
+
+[tables.platform_leaderboards.columns.player_id]
+type = "ref"
+
+[tables.platform_leaderboards.columns.score]
+type = "counter"
+
+[tables.platform_leaderboards.columns.metadata]
+type = "jsonb_nullable"
+nullable = true
+
+[tables.platform_leaderboards.columns.achieved_at]
+type = "timestamp"
+
+[tables.platform_leaderboards.fks.fk_leaderboards_game]
+columns = ["game_id"]
+ref_table = "game_catalog"
+ref_columns = ["id"]
+on_delete = "CASCADE"
+
+[tables.platform_leaderboards.fks.fk_leaderboards_player]
+columns = ["player_id"]
+ref_table = "players"
+ref_columns = ["id"]
+on_delete = "CASCADE"
+
+[tables.platform_leaderboards.indexes.idx_leaderboards_game_score]
+columns = ["game_id", "score DESC"]
+
+[tables.platform_leaderboards.indexes.idx_leaderboards_player]
+columns = ["player_id"]
+
+[tables.platform_leaderboards.indexes.idx_leaderboards_achieved_at]
+columns = ["achieved_at DESC"]
+
+# -- Player Privacy Settings --
+
+[tables.player_privacy_settings]
+comment = "Per-player privacy controls. Created at registration with all social features disabled (privacy-by-default)."
+pk = ["player_id"]
+
+[tables.player_privacy_settings.columns.player_id]
+type = "ref"
+
+[tables.player_privacy_settings.columns.public_profile]
+type = "flag"
+
+[tables.player_privacy_settings.columns.chat_enabled]
+type = "flag"
+
+[tables.player_privacy_settings.columns.friends_enabled]
+type = "flag"
+
+[tables.player_privacy_settings.columns.leaderboard_visible]
+type = "flag"
+default = "true"
+
+[tables.player_privacy_settings.columns.updated_at]
+type = "timestamp"
+
+[tables.player_privacy_settings.fks.fk_privacy_settings_player]
+columns = ["player_id"]
+ref_table = "players"
+ref_columns = ["id"]
+on_delete = "CASCADE"
+
+# -- Player Age Verification --
+
+[tables.player_age_verification]
+comment = "Age verification and parental consent state. is_minor is true when age < 16. Minors require parental consent before enabling social features."
+pk = ["player_id"]
+
+[tables.player_age_verification.columns.player_id]
+type = "ref"
+
+[tables.player_age_verification.columns.birth_date]
+type = "date_field"
+
+[tables.player_age_verification.columns.is_minor]
+type = "flag"
+comment = "True when age < 16"
+
+[tables.player_age_verification.columns.parental_consent_required]
+type = "flag"
+
+[tables.player_age_verification.columns.parental_consent_given]
+type = "flag"
+
+[tables.player_age_verification.columns.parent_email]
+type = "text_field"
+nullable = true
+
+[tables.player_age_verification.columns.consent_token]
+type = "text_field"
+nullable = true
+
+[tables.player_age_verification.columns.consent_token_expires_at]
+type = "timestamp_optional"
+
+[tables.player_age_verification.columns.consent_given_at]
+type = "timestamp_optional"
+
+[tables.player_age_verification.columns.created_at]
+type = "timestamp"
+
+[tables.player_age_verification.fks.fk_age_verification_player]
+columns = ["player_id"]
+ref_table = "players"
+ref_columns = ["id"]
+on_delete = "CASCADE"
+
+[tables.player_age_verification.indexes.idx_age_verification_consent_token]
+columns = ["consent_token"]
+where = "consent_token IS NOT NULL"
+
+# ============================================================
+# NEW TABLES
+# ============================================================
+
+# -- Player Profile --
+
+[tables.player_profile]
+comment = "Extended player profile with bio, avatar, and progression data."
+pk = ["player_id"]
+
+[tables.player_profile.columns.player_id]
+type = "ref"
+
+[tables.player_profile.columns.bio]
+type = "text_field"
+nullable = true
+
+[tables.player_profile.columns.avatar_url]
+type = "text_field"
+nullable = true
+
+[tables.player_profile.columns.status_text]
+type = "text_field"
+nullable = true
+
+[tables.player_profile.columns.level]
+type = "int"
+default = "1"
+
+[tables.player_profile.columns.xp]
+type = "counter"
+
+[tables.player_profile.fks.fk_player_profile_player]
+columns = ["player_id"]
+ref_table = "players"
+ref_columns = ["id"]
+on_delete = "CASCADE"
+
+# -- Player Setting --
+
+[tables.player_setting]
+comment = "Key-value player settings. Composite PK on (player_id, key)."
+pk = ["player_id", "key"]
+
+[tables.player_setting.columns.player_id]
+type = "ref"
+
+[tables.player_setting.columns.key]
+type = "text_field"
+
+[tables.player_setting.columns.value]
+type = "text_field"
+
+[tables.player_setting.fks.fk_player_setting_player]
+columns = ["player_id"]
+ref_table = "players"
+ref_columns = ["id"]
+on_delete = "CASCADE"
+
+# -- Game Version --
+
+[tables.game_version]
+comment = "Versioned game bundles. Each game can have multiple published versions."
+
+[tables.game_version.columns.id]
+type = "id"
+
+[tables.game_version.columns.game_id]
+type = "ref"
+
+[tables.game_version.columns.version_number]
+type = "text_field"
+
+[tables.game_version.columns.bundle_path]
+type = "text_field"
+
+[tables.game_version.columns.bundle_size]
+type = "counter"
+comment = "Bundle size in bytes"
+
+[tables.game_version.columns.changelog]
+type = "text_field"
+nullable = true
+
+[tables.game_version.columns.created_at]
+type = "timestamp"
+
+[tables.game_version.fks.fk_game_version_game]
+columns = ["game_id"]
+ref_table = "game_catalog"
+ref_columns = ["id"]
+on_delete = "CASCADE"
+
+[tables.game_version.indexes.idx_game_version_game_id]
+columns = ["game_id", "created_at"]
+
+# -- Game Fork --
+
+[tables.game_fork]
+comment = "Tracks when a game is forked (remixed) from another. Links parent and child games."
+
+[tables.game_fork.columns.id]
+type = "id"
+
+[tables.game_fork.columns.parent_game_id]
+type = "ref"
+
+[tables.game_fork.columns.child_game_id]
+type = "ref"
+
+[tables.game_fork.columns.forked_by]
+type = "ref"
+
+[tables.game_fork.columns.created_at]
+type = "timestamp"
+
+[tables.game_fork.fks.fk_game_fork_parent]
+columns = ["parent_game_id"]
+ref_table = "game_catalog"
+ref_columns = ["id"]
+on_delete = "CASCADE"
+
+[tables.game_fork.fks.fk_game_fork_child]
+columns = ["child_game_id"]
+ref_table = "game_catalog"
+ref_columns = ["id"]
+on_delete = "CASCADE"
+
+[tables.game_fork.fks.fk_game_fork_player]
+columns = ["forked_by"]
+ref_table = "players"
+ref_columns = ["id"]
+on_delete = "CASCADE"
+
+[tables.game_fork.indexes.idx_game_fork_parent]
+columns = ["parent_game_id"]
+
+[tables.game_fork.indexes.idx_game_fork_child]
+columns = ["child_game_id"]
+
+# -- Game Play --
+
+[tables.game_play]
+comment = "Individual play sessions. Tracks when a player plays a game, duration, and score."
+
+[tables.game_play.columns.id]
+type = "id"
+
+[tables.game_play.columns.game_id]
+type = "ref"
+
+[tables.game_play.columns.player_id]
+type = "ref"
+
+[tables.game_play.columns.version_id]
+type = "ref"
+nullable = true
+
+[tables.game_play.columns.duration_seconds]
+type = "int"
+nullable = true
+
+[tables.game_play.columns.completed]
+type = "flag"
+
+[tables.game_play.columns.score]
+type = "counter"
+nullable = true
+
+[tables.game_play.columns.created_at]
+type = "timestamp"
+
+[tables.game_play.fks.fk_game_play_game]
+columns = ["game_id"]
+ref_table = "game_catalog"
+ref_columns = ["id"]
+on_delete = "CASCADE"
+
+[tables.game_play.fks.fk_game_play_player]
+columns = ["player_id"]
+ref_table = "players"
+ref_columns = ["id"]
+on_delete = "CASCADE"
+
+[tables.game_play.fks.fk_game_play_version]
+columns = ["version_id"]
+ref_table = "game_version"
+ref_columns = ["id"]
+on_delete = "SET NULL"
+
+[tables.game_play.indexes.idx_game_play_game]
+columns = ["game_id", "created_at"]
+
+[tables.game_play.indexes.idx_game_play_player]
+columns = ["player_id", "created_at"]
+
+# -- Game Like --
+
+[tables.game_like]
+comment = "Player likes on games. Composite PK prevents duplicate likes."
+pk = ["player_id", "game_id"]
+
+[tables.game_like.columns.player_id]
+type = "ref"
+
+[tables.game_like.columns.game_id]
+type = "ref"
+
+[tables.game_like.columns.created_at]
+type = "timestamp"
+
+[tables.game_like.fks.fk_game_like_player]
+columns = ["player_id"]
+ref_table = "players"
+ref_columns = ["id"]
+on_delete = "CASCADE"
+
+[tables.game_like.fks.fk_game_like_game]
+columns = ["game_id"]
+ref_table = "game_catalog"
+ref_columns = ["id"]
+on_delete = "CASCADE"
+
+[tables.game_like.indexes.idx_game_like_game]
+columns = ["game_id"]
+
+# -- Game Comment --
+
+[tables.game_comment]
+comment = "Player comments on games."
+
+[tables.game_comment.columns.id]
+type = "id"
+
+[tables.game_comment.columns.game_id]
+type = "ref"
+
+[tables.game_comment.columns.player_id]
+type = "ref"
+
+[tables.game_comment.columns.body]
+type = "text_field"
+
+[tables.game_comment.columns.created_at]
+type = "timestamp"
+
+[tables.game_comment.fks.fk_game_comment_game]
+columns = ["game_id"]
+ref_table = "game_catalog"
+ref_columns = ["id"]
+on_delete = "CASCADE"
+
+[tables.game_comment.fks.fk_game_comment_player]
+columns = ["player_id"]
+ref_table = "players"
+ref_columns = ["id"]
+on_delete = "CASCADE"
+
+[tables.game_comment.indexes.idx_game_comment_game]
+columns = ["game_id", "created_at"]
+
+[tables.game_comment.indexes.idx_game_comment_player]
+columns = ["player_id"]
+
+# -- Follow --
+
+[tables.follow]
+comment = "Player-to-player follows. Composite PK prevents duplicate follows."
+pk = ["follower_id", "followed_id"]
+
+[tables.follow.columns.follower_id]
+type = "ref"
+
+[tables.follow.columns.followed_id]
+type = "ref"
+
+[tables.follow.columns.created_at]
+type = "timestamp"
+
+[tables.follow.fks.fk_follow_follower]
+columns = ["follower_id"]
+ref_table = "players"
+ref_columns = ["id"]
+on_delete = "CASCADE"
+
+[tables.follow.fks.fk_follow_followed]
+columns = ["followed_id"]
+ref_table = "players"
+ref_columns = ["id"]
+on_delete = "CASCADE"
+
+[tables.follow.checks.ck_follow_no_self]
+expr = "follower_id <> followed_id"
+
+[tables.follow.indexes.idx_follow_followed]
+columns = ["followed_id"]
+
+# -- Generation Job --
+
+[tables.generation_job]
+comment = "AI game generation jobs. Tracks prompt, model, cost, and progress."
+
+[tables.generation_job.columns.id]
+type = "id"
+
+[tables.generation_job.columns.requested_by]
+type = "ref"
+
+[tables.generation_job.columns.game_id]
+type = "ref"
+nullable = true
+comment = "Set after game is created"
+
+[tables.generation_job.columns.prompt]
+type = "text_field"
+
+[tables.generation_job.columns.status]
+type = "generation_status"
+
+[tables.generation_job.columns.model]
+type = "text_field"
+
+[tables.generation_job.columns.cost_cents]
+type = "int"
+default = "0"
+
+[tables.generation_job.columns.progress]
+type = "int"
+default = "0"
+comment = "0-100 percentage"
+
+[tables.generation_job.columns.error_message]
+type = "text_field"
+nullable = true
+
+[tables.generation_job.columns.created_at]
+type = "timestamp"
+
+[tables.generation_job.columns.completed_at]
+type = "timestamp_optional"
+
+[tables.generation_job.fks.fk_generation_job_player]
+columns = ["requested_by"]
+ref_table = "players"
+ref_columns = ["id"]
+on_delete = "CASCADE"
+
+[tables.generation_job.fks.fk_generation_job_game]
+columns = ["game_id"]
+ref_table = "game_catalog"
+ref_columns = ["id"]
+on_delete = "SET NULL"
+
+[tables.generation_job.indexes.idx_generation_job_player]
+columns = ["requested_by", "created_at"]
+
+[tables.generation_job.indexes.idx_generation_job_status]
+columns = ["status"]
+
+# -- Server Registry --
+
+[tables.server_registry]
+comment = "Game server fleet registry. Servers register on startup and heartbeat periodically. Used for room routing and load balancing."
+pk = ["id"]
+
+[tables.server_registry.columns.id]
+type = "text_field"
+comment = "Human-readable server identifier (e.g. python-1, zig-1)"
+
+[tables.server_registry.columns.host]
+type = "text_field"
+comment = "Hostname or IP address"
+
+[tables.server_registry.columns.port]
+type = "int"
+
+[tables.server_registry.columns.version]
+type = "text_field"
+comment = "Server version string"
+
+[tables.server_registry.columns.server_type]
+type = "server_type"
+
+[tables.server_registry.columns.status]
+type = "server_status"
+
+[tables.server_registry.columns.max_sessions]
+type = "int"
+
+[tables.server_registry.columns.active_sessions]
+type = "int"
+default = "0"
+
+[tables.server_registry.columns.last_heartbeat]
+type = "timestamp_no_default"
+
+[tables.server_registry.columns.registered_at]
+type = "timestamp"
+
+[tables.server_registry.indexes.idx_server_registry_status]
+columns = ["status"]
+
+[tables.server_registry.indexes.idx_server_registry_server_type]
+columns = ["server_type"]
+
+# -- Session --
+
+[tables.session]
+comment = "Multiplayer game sessions (lobbies). Tracks room code, player cap, and lifecycle."
+
+[tables.session.columns.id]
+type = "id"
+
+[tables.session.columns.game_id]
+type = "ref"
+
+[tables.session.columns.status]
+type = "session_status"
+
+[tables.session.columns.room_code]
+type = "text_field"
+
+[tables.session.columns.max_players]
+type = "int"
+
+[tables.session.columns.config]
+type = "json"
+comment = "Game-specific configuration for this session"
+
+[tables.session.columns.result]
+type = "jsonb_nullable"
+nullable = true
+comment = "Game result data set when session ends"
+
+[tables.session.columns.created_at]
+type = "timestamp"
+
+[tables.session.columns.started_at]
+type = "timestamp_optional"
+
+[tables.session.columns.ended_at]
+type = "timestamp_optional"
+
+[tables.session.columns.server_id]
+type = "text_field"
+nullable = true
+comment = "ID of the server hosting this session. NULL for sessions created before fleet routing."
+
+[tables.session.fks.fk_session_game]
+columns = ["game_id"]
+ref_table = "game_catalog"
+ref_columns = ["id"]
+on_delete = "CASCADE"
+
+[tables.session.fks.fk_session_server]
+columns = ["server_id"]
+ref_table = "server_registry"
+ref_columns = ["id"]
+on_delete = "SET NULL"
+
+[tables.session.indexes.idx_session_game]
+columns = ["game_id"]
+
+[tables.session.indexes.idx_session_room_code]
+columns = ["room_code"]
+
+[tables.session.indexes.idx_session_status]
+columns = ["status"]
+
+[tables.session.indexes.idx_session_server_id]
+columns = ["server_id"]
+
+# -- Session Participant --
+
+[tables.session_participant]
+comment = "Players in a game session with their role."
+pk = ["session_id", "player_id"]
+
+[tables.session_participant.columns.session_id]
+type = "ref"
+
+[tables.session_participant.columns.player_id]
+type = "ref"
+
+[tables.session_participant.columns.role]
+type = "session_role"
+
+[tables.session_participant.columns.joined_at]
+type = "timestamp"
+
+[tables.session_participant.fks.fk_session_participant_session]
+columns = ["session_id"]
+ref_table = "session"
+ref_columns = ["id"]
+on_delete = "CASCADE"
+
+[tables.session_participant.fks.fk_session_participant_player]
+columns = ["player_id"]
+ref_table = "players"
+ref_columns = ["id"]
+on_delete = "CASCADE"
+
+# -- Experiment --
+
+[tables.experiment]
+comment = "A/B experiments with variant definitions and allocation percentage."
+
+[tables.experiment.columns.id]
+type = "id"
+
+[tables.experiment.columns.name]
+type = "text_field"
+
+[tables.experiment.columns.description]
+type = "text_field"
+nullable = true
+
+[tables.experiment.columns.variants]
+type = "json"
+comment = "JSON array of variant definitions"
+
+[tables.experiment.columns.status]
+type = "experiment_status"
+
+[tables.experiment.columns.allocation_pct]
+type = "int"
+default = "100"
+comment = "Percentage of eligible players to enroll (0-100)"
+
+[tables.experiment.columns.created_at]
+type = "timestamp"
+
+[tables.experiment.unique.uq_experiment_name]
+columns = ["name"]
+
+# -- Experiment Assignment --
+
+[tables.experiment_assignment]
+comment = "Tracks which variant a player is assigned to in an experiment."
+pk = ["experiment_id", "player_id"]
+
+[tables.experiment_assignment.columns.experiment_id]
+type = "ref"
+
+[tables.experiment_assignment.columns.player_id]
+type = "ref"
+
+[tables.experiment_assignment.columns.variant]
+type = "text_field"
+
+[tables.experiment_assignment.columns.assigned_at]
+type = "timestamp"
+
+[tables.experiment_assignment.fks.fk_experiment_assignment_experiment]
+columns = ["experiment_id"]
+ref_table = "experiment"
+ref_columns = ["id"]
+on_delete = "CASCADE"
+
+[tables.experiment_assignment.fks.fk_experiment_assignment_player]
+columns = ["player_id"]
+ref_table = "players"
+ref_columns = ["id"]
+on_delete = "CASCADE"
+
+# -- Report --
+
+[tables.report]
+comment = "Player-submitted reports against other players, games, comments, or chat messages."
+
+[tables.report.columns.id]
+type = "id"
+
+[tables.report.columns.reporter_id]
+type = "ref"
+
+[tables.report.columns.target_type]
+type = "report_target_type"
+
+[tables.report.columns.target_id]
+type = "ref"
+comment = "UUID of the reported entity"
+
+[tables.report.columns.reason]
+type = "text_field"
+
+[tables.report.columns.status]
+type = "report_status"
+
+[tables.report.columns.created_at]
+type = "timestamp"
+
+[tables.report.fks.fk_report_reporter]
+columns = ["reporter_id"]
+ref_table = "players"
+ref_columns = ["id"]
+on_delete = "CASCADE"
+
+[tables.report.indexes.idx_report_reporter]
+columns = ["reporter_id"]
+
+[tables.report.indexes.idx_report_status]
+columns = ["status"]
+
+[tables.report.indexes.idx_report_target]
+columns = ["target_type", "target_id"]
+
+# -- Moderation Action --
+
+[tables.moderation_action]
+comment = "Actions taken by moderators in response to reports."
+
+[tables.moderation_action.columns.id]
+type = "id"
+
+[tables.moderation_action.columns.report_id]
+type = "ref"
+
+[tables.moderation_action.columns.action_type]
+type = "moderation_action_type"
+
+[tables.moderation_action.columns.moderator_note]
+type = "text_field"
+nullable = true
+
+[tables.moderation_action.columns.acted_at]
+type = "timestamp"
+
+[tables.moderation_action.fks.fk_moderation_action_report]
+columns = ["report_id"]
+ref_table = "report"
+ref_columns = ["id"]
+on_delete = "CASCADE"
+
+[tables.moderation_action.indexes.idx_moderation_action_report]
+columns = ["report_id"]
+
+# -- Currency Balance --
+
+[tables.currency_balance]
+comment = "Current virtual currency balance per player. Single row per player."
+pk = ["player_id"]
+
+[tables.currency_balance.columns.player_id]
+type = "ref"
+
+[tables.currency_balance.columns.balance]
+type = "counter"
+
+[tables.currency_balance.columns.updated_at]
+type = "timestamp"
+
+[tables.currency_balance.fks.fk_currency_balance_player]
+columns = ["player_id"]
+ref_table = "players"
+ref_columns = ["id"]
+on_delete = "CASCADE"
+
+# -- Currency Transaction --
+
+[tables.currency_transaction]
+comment = "Immutable ledger of virtual currency transactions."
+
+[tables.currency_transaction.columns.id]
+type = "id"
+
+[tables.currency_transaction.columns.player_id]
+type = "ref"
+
+[tables.currency_transaction.columns.amount]
+type = "counter"
+comment = "Signed amount (positive = credit, negative = debit)"
+
+[tables.currency_transaction.columns.type]
+type = "currency_transaction_type"
+
+[tables.currency_transaction.columns.reason]
+type = "text_field"
+
+[tables.currency_transaction.columns.reference_type]
+type = "text_field"
+nullable = true
+comment = "Entity type that triggered the transaction (e.g. game_play, achievement)"
+
+[tables.currency_transaction.columns.reference_id]
+type = "ref"
+nullable = true
+comment = "UUID of the triggering entity"
+
+[tables.currency_transaction.columns.created_at]
+type = "timestamp"
+
+[tables.currency_transaction.fks.fk_currency_transaction_player]
+columns = ["player_id"]
+ref_table = "players"
+ref_columns = ["id"]
+on_delete = "CASCADE"
+
+[tables.currency_transaction.indexes.idx_currency_transaction_player]
+columns = ["player_id", "created_at"]
+
+[tables.currency_transaction.indexes.idx_currency_transaction_type]
+columns = ["type"]
+
+# -- Achievement Definition --
+
+[tables.achievement_def]
+comment = "Achievement templates with criteria. Defines what achievements exist."
+
+[tables.achievement_def.columns.id]
+type = "id"
+
+[tables.achievement_def.columns.name]
+type = "text_field"
+
+[tables.achievement_def.columns.description]
+type = "text_field"
+
+[tables.achievement_def.columns.icon]
+type = "text_field"
+nullable = true
+
+[tables.achievement_def.columns.criteria]
+type = "json"
+comment = "JSON object describing the unlock criteria"
+
+[tables.achievement_def.columns.created_at]
+type = "timestamp"
+
+[tables.achievement_def.unique.uq_achievement_def_name]
+columns = ["name"]
+
+# -- Achievement --
+
+[tables.achievement]
+comment = "Earned achievements per player. Composite PK prevents duplicate awards."
+pk = ["player_id", "achievement_def_id"]
+
+[tables.achievement.columns.player_id]
+type = "ref"
+
+[tables.achievement.columns.achievement_def_id]
+type = "ref"
+
+[tables.achievement.columns.game_id]
+type = "ref"
+nullable = true
+comment = "Game that triggered the unlock, if applicable"
+
+[tables.achievement.columns.earned_at]
+type = "timestamp"
+
+[tables.achievement.fks.fk_achievement_player]
+columns = ["player_id"]
+ref_table = "players"
+ref_columns = ["id"]
+on_delete = "CASCADE"
+
+[tables.achievement.fks.fk_achievement_def]
+columns = ["achievement_def_id"]
+ref_table = "achievement_def"
+ref_columns = ["id"]
+on_delete = "CASCADE"
+
+[tables.achievement.fks.fk_achievement_game]
+columns = ["game_id"]
+ref_table = "game_catalog"
+ref_columns = ["id"]
+on_delete = "SET NULL"
+
+[tables.achievement.indexes.idx_achievement_game]
+columns = ["game_id"]
+where = "game_id IS NOT NULL"
+
+# -- Notification --
+
+[tables.notification]
+comment = "Player notifications for friend requests, likes, achievements, moderation, and system events."
+
+[tables.notification.columns.id]
+type = "id"
+
+[tables.notification.columns.player_id]
+type = "ref"
+
+[tables.notification.columns.type]
+type = "notification_type"
+
+[tables.notification.columns.title]
+type = "text_field"
+
+[tables.notification.columns.body]
+type = "text_field"
+
+[tables.notification.columns.data]
+type = "jsonb_nullable"
+nullable = true
+comment = "Arbitrary payload (e.g. friend request ID, game ID)"
+
+[tables.notification.columns.read]
+type = "flag"
+
+[tables.notification.columns.created_at]
+type = "timestamp"
+
+[tables.notification.fks.fk_notification_player]
+columns = ["player_id"]
+ref_table = "players"
+ref_columns = ["id"]
+on_delete = "CASCADE"
+
+[tables.notification.indexes.idx_notification_player_unread]
+columns = ["player_id", "created_at"]
+where = "read = false"
+
+[tables.notification.indexes.idx_notification_player]
+columns = ["player_id", "created_at"]
+
+# -- Action Log --
+
+[tables.action_log]
+comment = "Append-only game action log for replay and reconnection. Each action has a monotonically increasing sequence number within its session."
+
+[tables.action_log.columns.id]
+type = "id"
+
+[tables.action_log.columns.session_id]
+type = "ref"
+
+[tables.action_log.columns.player_id]
+type = "ref"
+
+[tables.action_log.columns.action]
+type = "json"
+
+[tables.action_log.columns.sequence_num]
+type = "counter"
+
+[tables.action_log.columns.created_at]
+type = "timestamp"
+
+[tables.action_log.fks.fk_action_log_session]
+columns = ["session_id"]
+ref_table = "session"
+ref_columns = ["id"]
+on_delete = "CASCADE"
+
+[tables.action_log.fks.fk_action_log_player]
+columns = ["player_id"]
+ref_table = "players"
+ref_columns = ["id"]
+on_delete = "CASCADE"
+
+[tables.action_log.indexes.idx_action_log_session_seq]
+columns = ["session_id", "sequence_num"]
+
+[tables.action_log.indexes.idx_action_log_player]
+columns = ["player_id"]
+
+# -- State Snapshot --
+
+[tables.state_snapshot]
+comment = "Periodic game state snapshots for fast reconnection. Load latest snapshot, replay actions from its sequence_num forward."
+
+[tables.state_snapshot.columns.id]
+type = "id"
+
+[tables.state_snapshot.columns.session_id]
+type = "ref"
+
+[tables.state_snapshot.columns.state]
+type = "json"
+
+[tables.state_snapshot.columns.action_sequence_num]
+type = "counter"
+
+[tables.state_snapshot.columns.created_at]
+type = "timestamp"
+
+[tables.state_snapshot.fks.fk_state_snapshot_session]
+columns = ["session_id"]
+ref_table = "session"
+ref_columns = ["id"]
+on_delete = "CASCADE"
+
+[tables.state_snapshot.indexes.idx_state_snapshot_session_seq]
+columns = ["session_id", "action_sequence_num"]
+
+# -- API Keys --
+
+[tables.api_keys]
+comment = "API keys for AI agent and service authentication. Keys are hashed; the plaintext is shown only once at creation."
+
+[tables.api_keys.columns.id]
+type = "id"
+
+[tables.api_keys.columns.player_id]
+type = "ref"
+
+[tables.api_keys.columns.key_hash]
+type = "text_field"
+
+[tables.api_keys.columns.name]
+type = "text_field"
+
+[tables.api_keys.columns.scopes]
+type = "json"
+
+[tables.api_keys.columns.created_at]
+type = "timestamp"
+
+[tables.api_keys.columns.last_used_at]
+type = "timestamp_optional"
+
+[tables.api_keys.columns.revoked_at]
+type = "timestamp_optional"
+
+[tables.api_keys.fks.fk_api_keys_player]
+columns = ["player_id"]
+ref_table = "players"
+ref_columns = ["id"]
+on_delete = "CASCADE"
+
+[tables.api_keys.indexes.idx_api_keys_player]
+columns = ["player_id"]
+
+[tables.api_keys.indexes.idx_api_keys_hash]
+columns = ["key_hash"]
+unique = true

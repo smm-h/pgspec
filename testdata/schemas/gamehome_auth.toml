@@ -1,0 +1,357 @@
+[meta]
+version = 1
+schema = "auth"
+extensions = ["pgcrypto"]
+
+# Custom types for the auth schema's conventions:
+# - Text-based IDs (not UUID) from the original auth library
+# - Epoch timestamps (double precision) instead of timestamptz
+
+[types.text_id]
+kind = "scalar"
+base_type = "text"
+comment = "Text primary key (opaque identifier from auth library)"
+
+[types.text_ref]
+kind = "scalar"
+base_type = "text"
+comment = "Text foreign key referencing a text_id"
+
+[types.text_field]
+kind = "scalar"
+base_type = "text"
+comment = "Generic text column"
+
+[types.text_nullable]
+kind = "scalar"
+base_type = "text"
+not_null = false
+comment = "Nullable text column"
+
+[types.epoch]
+kind = "scalar"
+base_type = "float8"
+comment = "Unix epoch timestamp as double precision"
+
+[types.epoch_nullable]
+kind = "scalar"
+base_type = "float8"
+not_null = false
+comment = "Nullable Unix epoch timestamp"
+
+[types.binary]
+kind = "scalar"
+base_type = "bytea"
+comment = "Binary data"
+
+[types.int]
+kind = "scalar"
+base_type = "integer"
+comment = "Integer column"
+
+[types.bigint_id]
+kind = "scalar"
+base_type = "bigint"
+comment = "Auto-incrementing bigint primary key"
+
+# -- Users --
+
+[tables.users]
+comment = "Core user accounts. All authentication methods link back here."
+pk = ["id"]
+
+[tables.users.columns.id]
+type = "text_id"
+comment = "Opaque user identifier"
+
+[tables.users.columns.username]
+type = "text_nullable"
+
+[tables.users.columns.display_name]
+type = "text_field"
+default = "''"
+
+[tables.users.columns.email]
+type = "text_nullable"
+
+[tables.users.columns.email_verified]
+type = "flag"
+
+[tables.users.columns.created_at]
+type = "epoch"
+
+[tables.users.columns.updated_at]
+type = "epoch"
+
+[tables.users.indexes.idx_users_email]
+columns = ["email"]
+where = "email IS NOT NULL"
+
+[tables.users.indexes.idx_users_username]
+columns = ["username"]
+unique = true
+where = "username IS NOT NULL"
+
+# -- Credentials --
+
+[tables.credentials]
+comment = "Password credentials. One row per user with a password."
+pk = ["user_id"]
+
+[tables.credentials.columns.user_id]
+type = "text_ref"
+
+[tables.credentials.columns.password_hash]
+type = "text_field"
+
+[tables.credentials.columns.created_at]
+type = "epoch"
+
+[tables.credentials.columns.updated_at]
+type = "epoch"
+
+[tables.credentials.fks.fk_credentials_user]
+columns = ["user_id"]
+ref_table = "users"
+ref_columns = ["id"]
+on_delete = "CASCADE"
+
+# -- Sessions --
+
+[tables.sessions]
+comment = "Active login sessions with expiry and device metadata."
+pk = ["id"]
+
+[tables.sessions.columns.id]
+type = "text_id"
+comment = "Session token"
+
+[tables.sessions.columns.user_id]
+type = "text_ref"
+
+[tables.sessions.columns.created_at]
+type = "epoch"
+
+[tables.sessions.columns.last_active]
+type = "epoch"
+
+[tables.sessions.columns.expires_at]
+type = "epoch"
+
+[tables.sessions.columns.ip]
+type = "text_nullable"
+
+[tables.sessions.columns.user_agent]
+type = "text_nullable"
+
+[tables.sessions.fks.fk_sessions_user]
+columns = ["user_id"]
+ref_table = "users"
+ref_columns = ["id"]
+on_delete = "CASCADE"
+
+[tables.sessions.indexes.idx_sessions_user_id]
+columns = ["user_id"]
+
+[tables.sessions.indexes.idx_sessions_expires_at]
+columns = ["expires_at"]
+
+# -- Provider Links --
+
+[tables.provider_links]
+comment = "OAuth/OIDC provider links. Composite PK on (provider, provider_sub) to prevent duplicates."
+pk = ["provider", "provider_sub"]
+
+[tables.provider_links.columns.user_id]
+type = "text_ref"
+
+[tables.provider_links.columns.provider]
+type = "text_field"
+
+[tables.provider_links.columns.provider_sub]
+type = "text_field"
+
+[tables.provider_links.columns.provider_email]
+type = "text_nullable"
+
+[tables.provider_links.columns.linked_at]
+type = "epoch"
+
+[tables.provider_links.fks.fk_provider_links_user]
+columns = ["user_id"]
+ref_table = "users"
+ref_columns = ["id"]
+on_delete = "CASCADE"
+
+[tables.provider_links.indexes.idx_provider_links_user_id]
+columns = ["user_id"]
+
+# -- Email Verifications --
+
+[tables.email_verifications]
+comment = "Pending email verification tokens with expiry."
+pk = ["token"]
+
+[tables.email_verifications.columns.token]
+type = "text_id"
+
+[tables.email_verifications.columns.user_id]
+type = "text_ref"
+
+[tables.email_verifications.columns.email]
+type = "text_field"
+
+[tables.email_verifications.columns.expires_at]
+type = "epoch"
+
+[tables.email_verifications.columns.used]
+type = "flag"
+
+[tables.email_verifications.fks.fk_email_verifications_user]
+columns = ["user_id"]
+ref_table = "users"
+ref_columns = ["id"]
+on_delete = "CASCADE"
+
+[tables.email_verifications.indexes.idx_email_verifications_user_id]
+columns = ["user_id"]
+
+# -- Password Resets --
+
+[tables.password_resets]
+comment = "Password reset tokens with expiry."
+pk = ["token"]
+
+[tables.password_resets.columns.token]
+type = "text_id"
+
+[tables.password_resets.columns.user_id]
+type = "text_ref"
+
+[tables.password_resets.columns.expires_at]
+type = "epoch"
+
+[tables.password_resets.columns.used]
+type = "flag"
+
+[tables.password_resets.fks.fk_password_resets_user]
+columns = ["user_id"]
+ref_table = "users"
+ref_columns = ["id"]
+on_delete = "CASCADE"
+
+[tables.password_resets.indexes.idx_password_resets_user_id]
+columns = ["user_id"]
+
+# -- Magic Links --
+
+[tables.magic_links]
+comment = "Passwordless login tokens sent via email."
+pk = ["token"]
+
+[tables.magic_links.columns.token]
+type = "text_id"
+
+[tables.magic_links.columns.email]
+type = "text_field"
+
+[tables.magic_links.columns.expires_at]
+type = "epoch"
+
+[tables.magic_links.columns.used]
+type = "flag"
+
+[tables.magic_links.indexes.idx_magic_links_email]
+columns = ["email"]
+
+# -- TOTP Secrets --
+
+[tables.totp_secrets]
+comment = "TOTP (authenticator app) secrets for two-factor authentication."
+pk = ["user_id"]
+
+[tables.totp_secrets.columns.user_id]
+type = "text_ref"
+
+[tables.totp_secrets.columns.secret]
+type = "text_field"
+
+[tables.totp_secrets.columns.verified]
+type = "flag"
+
+[tables.totp_secrets.columns.created_at]
+type = "epoch"
+
+[tables.totp_secrets.fks.fk_totp_secrets_user]
+columns = ["user_id"]
+ref_table = "users"
+ref_columns = ["id"]
+on_delete = "CASCADE"
+
+# -- Recovery Codes --
+
+[tables.recovery_codes]
+comment = "One-time-use backup codes for MFA recovery."
+pk = ["id"]
+
+[tables.recovery_codes.columns.id]
+type = "bigint_id"
+
+[tables.recovery_codes.columns.user_id]
+type = "text_ref"
+
+[tables.recovery_codes.columns.code_hash]
+type = "text_field"
+
+[tables.recovery_codes.columns.used]
+type = "flag"
+
+[tables.recovery_codes.fks.fk_recovery_codes_user]
+columns = ["user_id"]
+ref_table = "users"
+ref_columns = ["id"]
+on_delete = "CASCADE"
+
+[tables.recovery_codes.indexes.idx_recovery_codes_user_id]
+columns = ["user_id"]
+
+# -- WebAuthn Credentials --
+
+[tables.webauthn_credentials]
+comment = "FIDO2/WebAuthn passkey credentials."
+pk = ["id"]
+
+[tables.webauthn_credentials.columns.id]
+type = "text_id"
+comment = "Credential ID from the authenticator"
+
+[tables.webauthn_credentials.columns.user_id]
+type = "text_ref"
+
+[tables.webauthn_credentials.columns.public_key]
+type = "binary"
+
+[tables.webauthn_credentials.columns.attestation_type]
+type = "text_field"
+
+[tables.webauthn_credentials.columns.transport]
+type = "text_nullable"
+
+[tables.webauthn_credentials.columns.sign_count]
+type = "int"
+default = "0"
+
+[tables.webauthn_credentials.columns.created_at]
+type = "epoch"
+
+[tables.webauthn_credentials.columns.last_used]
+type = "epoch_nullable"
+
+[tables.webauthn_credentials.fks.fk_webauthn_credentials_user]
+columns = ["user_id"]
+ref_table = "users"
+ref_columns = ["id"]
+on_delete = "CASCADE"
+
+[tables.webauthn_credentials.indexes.idx_webauthn_credentials_user_id]
+columns = ["user_id"]
