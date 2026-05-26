@@ -79,7 +79,7 @@ func IsNonTransactional(op DDLOp) bool {
 func opCreateTable(op DDLOp) string {
 	if op.TableDef != nil {
 		schema, _ := splitQualifiedName(op.Table)
-		return sql.CreateTable(op.TableDef, schema, false, 0)
+		return sql.CreateTable(op.TableDef, schema, false, 0, nil)
 	}
 
 	// Fallback: generate from op fields (no full table def available).

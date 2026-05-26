@@ -182,7 +182,9 @@ func CreateEnum(schema, name string, values []string, idempotent bool) string {
 // PARTITION BY. Foreign keys are NOT included (they use ALTER TABLE for cycle safety).
 // pgVersion controls version-specific DDL: when > 0 and < 10, identity columns
 // fall back to bigserial. When 0 (unspecified) or >= 10, GENERATED AS IDENTITY is used.
-func CreateTable(table *model.Table, schemaName string, idempotent bool, pgVersion int) string {
+// enums is the list of enum types defined in the schema; when a column's PG type
+// matches an enum name, the type is emitted with its schema prefix.
+func CreateTable(table *model.Table, schemaName string, idempotent bool, pgVersion int, enums []model.Enum) string {
 	ifne := ""
 	if idempotent {
 		ifne = " IF NOT EXISTS"
@@ -194,7 +196,7 @@ func CreateTable(table *model.Table, schemaName string, idempotent bool, pgVersi
 
 	// Column definitions.
 	for _, col := range table.Columns {
-		lines = append(lines, "    "+columnDef(col, pgVersion))
+		lines = append(lines, "    "+columnDef(col, pgVersion, enums))
 	}
 
 	// Inline PRIMARY KEY constraint.
@@ -226,7 +228,8 @@ func CreateTable(table *model.Table, schemaName string, idempotent bool, pgVersi
 
 // columnDef builds a single column definition line.
 // pgVersion controls version-specific DDL (0 means unspecified, treated as latest).
-func columnDef(col model.Column, pgVersion int) string {
+// enums is used to schema-qualify enum type names in column definitions.
+func columnDef(col model.Column, pgVersion int, enums []model.Enum) string {
 	// Pre-PG10 identity fallback: replace identity column with bigserial.
 	if col.Identity != "" && pgVersion > 0 && pgVersion < 10 {
 		var parts []string
@@ -238,7 +241,7 @@ func columnDef(col model.Column, pgVersion int) string {
 	}
 
 	var parts []string
-	parts = append(parts, QuoteIdent(col.Name), col.PGType)
+	parts = append(parts, QuoteIdent(col.Name), resolveColumnType(col.PGType, enums))
 
 	if col.NotNull {
 		parts = append(parts, "NOT NULL")
@@ -258,6 +261,18 @@ func columnDef(col model.Column, pgVersion int) string {
 	}
 
 	return strings.Join(parts, " ")
+}
+
+// resolveColumnType returns the SQL type string for a column. If the type
+// matches a known enum, the enum's schema-qualified name is returned so that
+// the DDL works without relying on search_path.
+func resolveColumnType(pgType string, enums []model.Enum) string {
+	for _, e := range enums {
+		if e.Name == pgType {
+			return QualifiedName(e.Schema, e.Name)
+		}
+	}
+	return pgType
 }
 
 // AlterTableAddFK generates an ALTER TABLE ... ADD CONSTRAINT ... FOREIGN KEY statement.

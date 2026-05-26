@@ -128,6 +128,11 @@ func TestEnumGeneration(t *testing.T) {
 		t.Errorf("expected CREATE TYPE, got:\n%s", out)
 	}
 
+	// Enum column type must be schema-qualified in CREATE TABLE.
+	if !strings.Contains(out, "game.status NOT NULL") {
+		t.Errorf("expected schema-qualified enum type game.status in column def, got:\n%s", out)
+	}
+
 	// Enum should appear before CREATE TABLE
 	enumPos := strings.Index(out, "CREATE TYPE")
 	tablePos := strings.Index(out, "CREATE TABLE")
@@ -541,6 +546,11 @@ func TestMultiSchemaQualifiedNames(t *testing.T) {
 	}
 	if strings.Contains(out, `"".`) {
 		t.Errorf("output contains empty-schema qualified name (\"\".): \n%s", out)
+	}
+
+	// Enum column type in CREATE TABLE must be schema-qualified.
+	if !strings.Contains(out, "auth.role NOT NULL") {
+		t.Errorf("expected schema-qualified enum type auth.role in column def, got:\n%s", out)
 	}
 
 	// ALTER TABLE FK uses game schema for the source table.
