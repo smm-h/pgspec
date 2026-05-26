@@ -300,6 +300,10 @@ func TestCleanSchema(t *testing.T) {
 					RefTable:  "users",
 					OnDelete:  "cascade",
 				}},
+				Indexes: []model.Index{{
+					Name:    "idx_posts_user_id",
+					Columns: []string{"user_id"},
+				}},
 			},
 		},
 	}
@@ -308,6 +312,275 @@ func TestCleanSchema(t *testing.T) {
 	errors := filterSeverity(diags, diagnostic.Error)
 	if len(errors) > 0 {
 		t.Fatalf("expected no errors for clean schema, got %d: %v", len(errors), errors)
+	}
+}
+
+func TestE200_MissingColumnType(t *testing.T) {
+	schema := &model.Schema{
+		Tables: []model.Table{{
+			Name:    "events",
+			Schema:  "public",
+			Comment: "Events table",
+			PK:      []string{"id"},
+			Columns: []model.Column{
+				{Name: "id", PGType: "uuid"},
+				{Name: "data", PGType: ""}, // missing type
+				{Name: "created_at", PGType: "timestamptz"},
+			},
+		}},
+	}
+
+	diags := Validate(schema, nil)
+	found := findByCode(diags, "E200")
+	if len(found) == 0 {
+		t.Fatal("expected E200 for column missing type")
+	}
+	if found[0].Column != "data" {
+		t.Errorf("expected column 'data', got %q", found[0].Column)
+	}
+}
+
+func TestE212_FKMissingIndex(t *testing.T) {
+	schema := &model.Schema{
+		Tables: []model.Table{
+			{
+				Name:    "orders",
+				Schema:  "public",
+				Comment: "Orders table",
+				PK:      []string{"id"},
+				Columns: []model.Column{
+					{Name: "id", PGType: "uuid"},
+					{Name: "user_id", PGType: "uuid"},
+					{Name: "created_at", PGType: "timestamptz"},
+				},
+				FKs: []model.FK{{
+					Name:      "fk_user",
+					Columns:   []string{"user_id"},
+					RefSchema: "public",
+					RefTable:  "users",
+					OnDelete:  "cascade",
+				}},
+				// No indexes -- should trigger E212
+			},
+			{
+				Name:    "users",
+				Schema:  "public",
+				Comment: "Users table",
+				PK:      []string{"id"},
+				Columns: []model.Column{
+					{Name: "id", PGType: "uuid"},
+					{Name: "created_at", PGType: "timestamptz"},
+				},
+			},
+		},
+	}
+
+	diags := Validate(schema, nil)
+	found := findByCode(diags, "E212")
+	if len(found) == 0 {
+		t.Fatal("expected E212 for FK missing covering index")
+	}
+	if found[0].Table != "orders" {
+		t.Errorf("expected table 'orders', got %q", found[0].Table)
+	}
+}
+
+func TestE212_FKWithIndex_NoDiag(t *testing.T) {
+	schema := &model.Schema{
+		Tables: []model.Table{
+			{
+				Name:    "orders",
+				Schema:  "public",
+				Comment: "Orders table",
+				PK:      []string{"id"},
+				Columns: []model.Column{
+					{Name: "id", PGType: "uuid"},
+					{Name: "user_id", PGType: "uuid"},
+					{Name: "created_at", PGType: "timestamptz"},
+				},
+				FKs: []model.FK{{
+					Name:      "fk_user",
+					Columns:   []string{"user_id"},
+					RefSchema: "public",
+					RefTable:  "users",
+					OnDelete:  "cascade",
+				}},
+				Indexes: []model.Index{{
+					Name:    "idx_orders_user_id",
+					Columns: []string{"user_id"},
+				}},
+			},
+			{
+				Name:    "users",
+				Schema:  "public",
+				Comment: "Users table",
+				PK:      []string{"id"},
+				Columns: []model.Column{
+					{Name: "id", PGType: "uuid"},
+					{Name: "created_at", PGType: "timestamptz"},
+				},
+			},
+		},
+	}
+
+	diags := Validate(schema, nil)
+	found := findByCode(diags, "E212")
+	if len(found) > 0 {
+		t.Fatal("expected no E212 when FK has covering index")
+	}
+}
+
+func TestW003_BooleanStates(t *testing.T) {
+	schema := &model.Schema{
+		Tables: []model.Table{{
+			Name:    "users",
+			Schema:  "public",
+			Comment: "Users table",
+			PK:      []string{"id"},
+			Columns: []model.Column{
+				{Name: "id", PGType: "uuid"},
+				{Name: "is_active", PGType: "boolean"},
+				{Name: "is_verified", PGType: "boolean"},
+				{Name: "is_admin", PGType: "boolean"},
+				{Name: "created_at", PGType: "timestamptz"},
+			},
+		}},
+	}
+
+	diags := Validate(schema, nil)
+	found := findByCode(diags, "W003")
+	if len(found) == 0 {
+		t.Fatal("expected W003 for 3+ boolean columns")
+	}
+	if found[0].Table != "users" {
+		t.Errorf("expected table 'users', got %q", found[0].Table)
+	}
+}
+
+func TestW003_TwoBooleans_NoDiag(t *testing.T) {
+	schema := &model.Schema{
+		Tables: []model.Table{{
+			Name:    "users",
+			Schema:  "public",
+			Comment: "Users table",
+			PK:      []string{"id"},
+			Columns: []model.Column{
+				{Name: "id", PGType: "uuid"},
+				{Name: "is_active", PGType: "boolean"},
+				{Name: "is_verified", PGType: "boolean"},
+				{Name: "created_at", PGType: "timestamptz"},
+			},
+		}},
+	}
+
+	diags := Validate(schema, nil)
+	found := findByCode(diags, "W003")
+	if len(found) > 0 {
+		t.Fatal("expected no W003 for only 2 boolean columns")
+	}
+}
+
+func TestW004_JSONCouldBeTable(t *testing.T) {
+	schema := &model.Schema{
+		Tables: []model.Table{{
+			Name:    "users",
+			Schema:  "public",
+			Comment: "Users table",
+			PK:      []string{"id"},
+			Columns: []model.Column{
+				{Name: "id", PGType: "uuid"},
+				{Name: "tags", PGType: "jsonb", Default: "'[]'::jsonb"},
+				{Name: "created_at", PGType: "timestamptz"},
+			},
+		}},
+	}
+
+	diags := Validate(schema, nil)
+	found := findByCode(diags, "W004")
+	if len(found) == 0 {
+		t.Fatal("expected W004 for plural jsonb column with array default")
+	}
+	if found[0].Column != "tags" {
+		t.Errorf("expected column 'tags', got %q", found[0].Column)
+	}
+}
+
+func TestW004_NonPlural_NoDiag(t *testing.T) {
+	schema := &model.Schema{
+		Tables: []model.Table{{
+			Name:    "users",
+			Schema:  "public",
+			Comment: "Users table",
+			PK:      []string{"id"},
+			Columns: []model.Column{
+				{Name: "id", PGType: "uuid"},
+				{Name: "metadata", PGType: "jsonb", Default: "'[]'::jsonb"},
+				{Name: "created_at", PGType: "timestamptz"},
+			},
+		}},
+	}
+
+	diags := Validate(schema, nil)
+	found := findByCode(diags, "W004")
+	if len(found) > 0 {
+		t.Fatal("expected no W004 for non-plural jsonb column")
+	}
+}
+
+func TestW007_RedundantIndex(t *testing.T) {
+	schema := &model.Schema{
+		Tables: []model.Table{{
+			Name:    "orders",
+			Schema:  "public",
+			Comment: "Orders table",
+			PK:      []string{"id"},
+			Columns: []model.Column{
+				{Name: "id", PGType: "uuid"},
+				{Name: "user_id", PGType: "uuid"},
+				{Name: "status", PGType: "text"},
+				{Name: "created_at", PGType: "timestamptz"},
+			},
+			Indexes: []model.Index{
+				{Name: "idx_user", Columns: []string{"user_id"}, Method: "btree"},
+				{Name: "idx_user_status", Columns: []string{"user_id", "status"}, Method: "btree"},
+			},
+		}},
+	}
+
+	diags := Validate(schema, nil)
+	found := findByCode(diags, "W007")
+	if len(found) == 0 {
+		t.Fatal("expected W007 for redundant index (prefix of another with same method)")
+	}
+	if found[0].Table != "orders" {
+		t.Errorf("expected table 'orders', got %q", found[0].Table)
+	}
+}
+
+func TestW007_DifferentMethod_NoDiag(t *testing.T) {
+	schema := &model.Schema{
+		Tables: []model.Table{{
+			Name:    "orders",
+			Schema:  "public",
+			Comment: "Orders table",
+			PK:      []string{"id"},
+			Columns: []model.Column{
+				{Name: "id", PGType: "uuid"},
+				{Name: "user_id", PGType: "uuid"},
+				{Name: "status", PGType: "text"},
+				{Name: "created_at", PGType: "timestamptz"},
+			},
+			Indexes: []model.Index{
+				{Name: "idx_user_hash", Columns: []string{"user_id"}, Method: "hash"},
+				{Name: "idx_user_status", Columns: []string{"user_id", "status"}, Method: "btree"},
+			},
+		}},
+	}
+
+	diags := Validate(schema, nil)
+	found := findByCode(diags, "W007")
+	if len(found) > 0 {
+		t.Fatal("expected no W007 when index methods differ")
 	}
 }
 

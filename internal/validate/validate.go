@@ -3,6 +3,7 @@
 package validate
 
 import (
+	"fmt"
 	"regexp"
 	"strings"
 
@@ -54,6 +55,7 @@ func Validate(schema *model.Schema, config *Config) []diagnostic.Diagnostic {
 	}
 
 	rules := []rule{
+		{"E200", checkMissingColumnType},
 		{"E201", checkFKMissingOnDelete},
 		{"E202", checkTableMissingComment},
 		{"E203", checkTableMissingPK},
@@ -64,11 +66,15 @@ func Validate(schema *model.Schema, config *Config) []diagnostic.Diagnostic {
 		{"E209", checkSerialUsage},
 		{"E210", checkFloatMoney},
 		{"E211", checkNamingConvention},
+		{"E212", checkFKMissingIndex},
 		{"E214", checkOpclassMissingExtension},
 		{"W001", checkGodTable},
 		{"W002", checkOrphanTable},
+		{"W003", checkBooleanStates},
+		{"W004", checkJSONCouldBeTable},
 		{"W005", checkMissingTimestamps},
 		{"W006", checkPreferText},
+		{"W007", checkRedundantIndex},
 		{"W008", checkCircularFK},
 	}
 
@@ -83,6 +89,26 @@ func Validate(schema *model.Schema, config *Config) []diagnostic.Diagnostic {
 }
 
 // --- Error rules ---
+
+// checkMissingColumnType (E200): column has no PGType set.
+func checkMissingColumnType(schema *model.Schema, _ *Config) []diagnostic.Diagnostic {
+	var diags []diagnostic.Diagnostic
+	for _, t := range schema.Tables {
+		for _, col := range t.Columns {
+			if col.PGType == "" {
+				diags = append(diags, diagnostic.Diagnostic{
+					Severity:   diagnostic.Error,
+					Code:       "E200",
+					Table:      t.Name,
+					Column:     col.Name,
+					Message:    "column missing type",
+					Suggestion: "Add a type to the column definition",
+				})
+			}
+		}
+	}
+	return diags
+}
 
 // checkFKMissingOnDelete (E201): FK constraint has no ON DELETE clause.
 func checkFKMissingOnDelete(schema *model.Schema, _ *Config) []diagnostic.Diagnostic {
@@ -318,6 +344,25 @@ func checkNamingConvention(schema *model.Schema, config *Config) []diagnostic.Di
 	return diags
 }
 
+// checkFKMissingIndex (E212): FK columns have no covering index.
+func checkFKMissingIndex(schema *model.Schema, _ *Config) []diagnostic.Diagnostic {
+	var diags []diagnostic.Diagnostic
+	for _, t := range schema.Tables {
+		for _, fk := range t.FKs {
+			if !t.HasIndexCovering(fk.Columns) {
+				diags = append(diags, diagnostic.Diagnostic{
+					Severity:   diagnostic.Error,
+					Code:       "E212",
+					Table:      t.Name,
+					Message:    "FK " + fk.Name + " columns have no covering index",
+					Suggestion: "Add an index on (" + strings.Join(fk.Columns, ", ") + ")",
+				})
+			}
+		}
+	}
+	return diags
+}
+
 // checkOpclassMissingExtension (E214): index opclass requires an extension not declared.
 func checkOpclassMissingExtension(schema *model.Schema, config *Config) []diagnostic.Diagnostic {
 	if config.ExtRegistry == nil {
@@ -410,6 +455,55 @@ func checkOrphanTable(schema *model.Schema, _ *Config) []diagnostic.Diagnostic {
 	return diags
 }
 
+// checkBooleanStates (W003): table has 3+ boolean columns, suggesting an enum state machine.
+func checkBooleanStates(schema *model.Schema, _ *Config) []diagnostic.Diagnostic {
+	var diags []diagnostic.Diagnostic
+	for _, t := range schema.Tables {
+		count := 0
+		for _, col := range t.Columns {
+			if strings.ToLower(col.PGType) == "boolean" {
+				count++
+			}
+		}
+		if count >= 3 {
+			diags = append(diags, diagnostic.Diagnostic{
+				Severity:   diagnostic.Warning,
+				Code:       "W003",
+				Table:      t.Name,
+				Message:    fmt.Sprintf("%d boolean columns suggest an enum/state machine", count),
+				Suggestion: "Consider replacing boolean flags with an enum column",
+			})
+		}
+	}
+	return diags
+}
+
+// checkJSONCouldBeTable (W004): plural-named jsonb column with empty array default.
+func checkJSONCouldBeTable(schema *model.Schema, _ *Config) []diagnostic.Diagnostic {
+	var diags []diagnostic.Diagnostic
+	for _, t := range schema.Tables {
+		for _, col := range t.Columns {
+			if strings.ToLower(col.PGType) != "jsonb" {
+				continue
+			}
+			if !strings.HasSuffix(col.Name, "s") {
+				continue
+			}
+			if col.Default == "'[]'::jsonb" || strings.Contains(col.DefaultExpr, "[]") {
+				diags = append(diags, diagnostic.Diagnostic{
+					Severity:   diagnostic.Warning,
+					Code:       "W004",
+					Table:      t.Name,
+					Column:     col.Name,
+					Message:    "jsonb array column could be a separate table",
+					Suggestion: "Consider normalizing into a related table with a foreign key",
+				})
+			}
+		}
+	}
+	return diags
+}
+
 // checkMissingTimestamps (W005): non-junction table lacks created_at.
 func checkMissingTimestamps(schema *model.Schema, _ *Config) []diagnostic.Diagnostic {
 	var diags []diagnostic.Diagnostic
@@ -453,6 +547,35 @@ func checkPreferText(schema *model.Schema, _ *Config) []diagnostic.Diagnostic {
 					Message:    "char(n) usage: prefer text",
 					Suggestion: "Use text instead of char(n)",
 				})
+			}
+		}
+	}
+	return diags
+}
+
+// checkRedundantIndex (W007): same method, one index's columns are a leading prefix of another.
+func checkRedundantIndex(schema *model.Schema, _ *Config) []diagnostic.Diagnostic {
+	var diags []diagnostic.Diagnostic
+	for _, t := range schema.Tables {
+		for i, idx := range t.Indexes {
+			for j, other := range t.Indexes {
+				if i == j {
+					continue
+				}
+				// Only compare indexes with the same method.
+				if idx.Method != other.Method {
+					continue
+				}
+				if isPrefix(idx.Columns, other.Columns) && len(idx.Columns) < len(other.Columns) {
+					diags = append(diags, diagnostic.Diagnostic{
+						Severity:   diagnostic.Warning,
+						Code:       "W007",
+						Table:      t.Name,
+						Message:    "redundant index: " + idx.Name + " is a prefix of " + other.Name + " (same method)",
+						Suggestion: "Drop " + idx.Name + "; " + other.Name + " already covers its queries",
+					})
+					break
+				}
 			}
 		}
 	}
