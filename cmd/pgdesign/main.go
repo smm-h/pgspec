@@ -139,14 +139,18 @@ func handleValidate(kwargs map[string]interface{}) int {
 		return exitCode
 	}
 
-	config := &validate.Config{
-		NamingPattern: "snake_case",
-		MaxColumns:    30,
+	// Try to load project config from the directory of the first path argument.
+	cfg := loadProjectConfig(paths[0])
+
+	valCfg := &validate.Config{
+		NamingPattern: cfg.Validate.NamingPattern,
+		MaxColumns:    cfg.Validate.MaxColumns,
+		Disabled:      cfg.Validate.Disable,
 		Extensions:    schema.Extensions,
 		ExtRegistry:   extregistry.NewBuiltinRegistry(),
 	}
 
-	diags := validate.Validate(schema, config)
+	diags := validate.Validate(schema, valCfg)
 	if len(diags) > 0 {
 		fmt.Fprint(os.Stderr, diagnostic.RenderTerminal(diags, true))
 	}
@@ -214,6 +218,23 @@ func handleAudit(kwargs map[string]interface{}) int {
 		return 1
 	}
 	return 0
+}
+
+// loadProjectConfig attempts to load pgdesign.toml from the directory containing
+// the given path (or the path itself if it's a directory). Returns a zero-valued
+// config silently if no config file is found.
+func loadProjectConfig(path string) *config.Config {
+	dir := path
+	info, err := os.Stat(path)
+	if err == nil && !info.IsDir() {
+		dir = filepath.Dir(path)
+	}
+	cfg, err := config.LoadOrDefault(dir)
+	if err != nil {
+		// Config exists but is malformed; fall back to defaults.
+		return &config.Config{}
+	}
+	return cfg
 }
 
 // extractPaths extracts the path(s) from kwargs. Handles the variadic "path"
