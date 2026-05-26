@@ -13,6 +13,8 @@ func OpToSQL(op DDLOp) string {
 	switch op.Op {
 	case "create_table":
 		return opCreateTable(op)
+	case "create_partition":
+		return opCreatePartition(op)
 	case "drop_table":
 		return opDropTable(op)
 	case "add_column":
@@ -84,6 +86,15 @@ func opCreateTable(op DDLOp) string {
 
 	// Fallback: generate from op fields (no full table def available).
 	return fmt.Sprintf("CREATE TABLE %s ();", quoteQualified(op.Table))
+}
+
+func opCreatePartition(op DDLOp) string {
+	if op.PartitionChildSpec != nil && op.ParentTable != "" {
+		schema, parentName := splitQualifiedName(op.ParentTable)
+		return sql.CreatePartitionOf(schema, op.PartitionChildSpec, parentName, false)
+	}
+	// Fallback: cannot generate without child spec.
+	return fmt.Sprintf("-- create_partition: missing child spec for %s", op.Table)
 }
 
 func opDropTable(op DDLOp) string {

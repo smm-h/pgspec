@@ -12,13 +12,28 @@ import (
 
 // GenerateMigration converts a SchemaDiff into a Migration with DDL/DML ops
 // and safety diagnostics. The desired schema is used to look up full table
-// definitions for create_table ops.
-func GenerateMigration(d *diff.SchemaDiff, desired *model.Schema, version string) (*Migration, []diagnostic.Diagnostic) {
+// definitions for create_table ops. tableStats provides estimated row counts
+// from pg_stat_user_tables (nil when --db is not available or stats are
+// unavailable). largeFKThreshold is the row count above which E215 is emitted
+// for ADD CONSTRAINT without NOT VALID; pass 0 to use the default of 10000.
+func GenerateMigration(d *diff.SchemaDiff, desired *model.Schema, version string, tableStats TableStats, largeFKThreshold int64) (*Migration, []diagnostic.Diagnostic) {
+	if largeFKThreshold <= 0 {
+		largeFKThreshold = 10_000
+	}
 	m := &Migration{
 		Version:     version,
 		Description: generateDescription(d),
 	}
 	var diags []diagnostic.Diagnostic
+
+	// tableCtx builds an OpContext with EstimatedRows and PGVersion populated
+	// from tableStats and the desired schema's PGVersion.
+	tableCtx := func(tableName string) risk.OpContext {
+		return risk.OpContext{
+			EstimatedRows: lookupRows(tableStats, tableName),
+			PGVersion:     desired.PGVersion,
+		}
+	}
 
 	// Phase 1: Creates (enums first, then tables).
 	for _, enumName := range d.EnumsAdded {
@@ -40,7 +55,7 @@ func GenerateMigration(d *diff.SchemaDiff, desired *model.Schema, version string
 			},
 		}
 		m.DDLOps = append(m.DDLOps, op)
-		diags = append(diags, classifyOp(op, risk.OpType("create_enum"), risk.OpContext{})...)
+		diags = append(diags, classifyOp(op, risk.OpType("create_enum"), risk.OpContext{PGVersion: desired.PGVersion})...)
 	}
 
 	for _, enumDiff := range d.EnumsChanged {
@@ -54,12 +69,13 @@ func GenerateMigration(d *diff.SchemaDiff, desired *model.Schema, version string
 				Down:   &DownOp{Irreversible: true},
 			}
 			m.DDLOps = append(m.DDLOps, op)
-			diags = append(diags, classifyOp(op, risk.OpAlterEnumAddValue, risk.OpContext{})...)
+			diags = append(diags, classifyOp(op, risk.OpAlterEnumAddValue, risk.OpContext{PGVersion: desired.PGVersion})...)
 		}
 	}
 
 	for _, tableName := range d.TablesAdded {
 		table := findTable(desired, tableName)
+		ctx := tableCtx(tableName)
 		op := DDLOp{
 			Op:       "create_table",
 			Table:    tableName,
@@ -71,14 +87,15 @@ func GenerateMigration(d *diff.SchemaDiff, desired *model.Schema, version string
 			},
 		}
 		m.DDLOps = append(m.DDLOps, op)
-		diags = append(diags, classifyOp(op, risk.OpCreateTable, risk.OpContext{})...)
+		diags = append(diags, classifyOp(op, risk.OpCreateTable, ctx)...)
 
 		// Add FKs, indexes, uniques, checks for new tables.
 		if table != nil {
 			for _, fk := range table.FKs {
 				fkOp := makeFKOp(tableName, fk)
 				m.DDLOps = append(m.DDLOps, fkOp)
-				diags = append(diags, classifyOp(fkOp, risk.OpAddFK, risk.OpContext{})...)
+				diags = append(diags, classifyOp(fkOp, risk.OpAddFK, ctx)...)
+				diags = append(diags, checkE215(fkOp, ctx, largeFKThreshold)...)
 			}
 			for _, idx := range table.Indexes {
 				idxOp := makeIndexOp(tableName, idx)
@@ -87,30 +104,30 @@ func GenerateMigration(d *diff.SchemaDiff, desired *model.Schema, version string
 				if strings.Contains(idxOp.Op, "concurrently") {
 					opType = risk.OpCreateIndexConcurrently
 				}
-				diags = append(diags, classifyOp(idxOp, opType, risk.OpContext{})...)
+				diags = append(diags, classifyOp(idxOp, opType, ctx)...)
 			}
 			for _, uq := range table.Uniques {
 				uqOp := makeUniqueOp(tableName, uq)
 				m.DDLOps = append(m.DDLOps, uqOp)
-				diags = append(diags, classifyOp(uqOp, risk.OpAddUnique, risk.OpContext{})...)
+				diags = append(diags, classifyOp(uqOp, risk.OpAddUnique, ctx)...)
 			}
 			for _, ck := range table.Checks {
 				ckOp := makeCheckOp(tableName, ck)
 				m.DDLOps = append(m.DDLOps, ckOp)
-				diags = append(diags, classifyOp(ckOp, risk.OpAddCheck, risk.OpContext{})...)
+				diags = append(diags, classifyOp(ckOp, risk.OpAddCheck, ctx)...)
 			}
 		}
 	}
 
 	// Phase 2: Table changes (add columns, alter columns, add constraints).
 	for _, td := range d.TablesChanged {
+		ctx := tableCtx(td.Name)
+
 		// Added columns.
 		for _, col := range td.ColumnsAdded {
-			ctx := risk.OpContext{
-				IsNullable: !col.NotNull,
-				HasDefault: col.Default != "" || col.DefaultExpr != "",
-				PGVersion:  desired.PGVersion,
-			}
+			colCtx := ctx
+			colCtx.IsNullable = !col.NotNull
+			colCtx.HasDefault = col.Default != "" || col.DefaultExpr != ""
 			op := DDLOp{
 				Op:      "add_column",
 				Table:   td.Name,
@@ -127,13 +144,12 @@ func GenerateMigration(d *diff.SchemaDiff, desired *model.Schema, version string
 				op.Default = col.DefaultExpr
 			}
 			m.DDLOps = append(m.DDLOps, op)
-			diags = append(diags, classifyOp(op, risk.OpAddColumn, ctx)...)
+			diags = append(diags, classifyOp(op, risk.OpAddColumn, colCtx)...)
 		}
 
 		// Changed columns.
 		for _, cc := range td.ColumnsChanged {
 			if cc.TypeChanged != nil {
-				ctx := risk.OpContext{}
 				op := DDLOp{
 					Op:     "alter_column_type",
 					Table:  td.Name,
@@ -156,7 +172,7 @@ func GenerateMigration(d *diff.SchemaDiff, desired *model.Schema, version string
 						},
 					}
 					m.DDLOps = append(m.DDLOps, op)
-					diags = append(diags, classifyOp(op, risk.OpSetNotNull, risk.OpContext{})...)
+					diags = append(diags, classifyOp(op, risk.OpSetNotNull, ctx)...)
 				} else {
 					// Becoming nullable.
 					op := DDLOp{
@@ -168,7 +184,7 @@ func GenerateMigration(d *diff.SchemaDiff, desired *model.Schema, version string
 						},
 					}
 					m.DDLOps = append(m.DDLOps, op)
-					diags = append(diags, classifyOp(op, risk.OpDropNotNull, risk.OpContext{})...)
+					diags = append(diags, classifyOp(op, risk.OpDropNotNull, ctx)...)
 				}
 			}
 			if cc.DefaultChanged != nil {
@@ -211,7 +227,8 @@ func GenerateMigration(d *diff.SchemaDiff, desired *model.Schema, version string
 		for _, fk := range td.FKsAdded {
 			fkOp := makeFKOp(td.Name, fk)
 			m.DDLOps = append(m.DDLOps, fkOp)
-			diags = append(diags, classifyOp(fkOp, risk.OpAddFK, risk.OpContext{})...)
+			diags = append(diags, classifyOp(fkOp, risk.OpAddFK, ctx)...)
+			diags = append(diags, checkE215(fkOp, ctx, largeFKThreshold)...)
 		}
 
 		// Removed FKs.
@@ -233,7 +250,7 @@ func GenerateMigration(d *diff.SchemaDiff, desired *model.Schema, version string
 			if strings.Contains(idxOp.Op, "concurrently") {
 				opType = risk.OpCreateIndexConcurrently
 			}
-			diags = append(diags, classifyOp(idxOp, opType, risk.OpContext{})...)
+			diags = append(diags, classifyOp(idxOp, opType, ctx)...)
 		}
 
 		// Removed indexes.
@@ -245,14 +262,14 @@ func GenerateMigration(d *diff.SchemaDiff, desired *model.Schema, version string
 				Down:  &DownOp{Irreversible: true},
 			}
 			m.DDLOps = append(m.DDLOps, op)
-			diags = append(diags, classifyOp(op, risk.OpDropIndex, risk.OpContext{})...)
+			diags = append(diags, classifyOp(op, risk.OpDropIndex, ctx)...)
 		}
 
 		// Added uniques.
 		for _, uq := range td.UniquesAdded {
 			uqOp := makeUniqueOp(td.Name, uq)
 			m.DDLOps = append(m.DDLOps, uqOp)
-			diags = append(diags, classifyOp(uqOp, risk.OpAddUnique, risk.OpContext{})...)
+			diags = append(diags, classifyOp(uqOp, risk.OpAddUnique, ctx)...)
 		}
 
 		// Removed uniques.
@@ -264,14 +281,14 @@ func GenerateMigration(d *diff.SchemaDiff, desired *model.Schema, version string
 				Down:  &DownOp{Irreversible: true},
 			}
 			m.DDLOps = append(m.DDLOps, op)
-			diags = append(diags, classifyOp(op, risk.OpDropUnique, risk.OpContext{})...)
+			diags = append(diags, classifyOp(op, risk.OpDropUnique, ctx)...)
 		}
 
 		// Added checks.
 		for _, ck := range td.ChecksAdded {
 			ckOp := makeCheckOp(td.Name, ck)
 			m.DDLOps = append(m.DDLOps, ckOp)
-			diags = append(diags, classifyOp(ckOp, risk.OpAddCheck, risk.OpContext{})...)
+			diags = append(diags, classifyOp(ckOp, risk.OpAddCheck, ctx)...)
 		}
 
 		// Removed checks.
@@ -283,7 +300,7 @@ func GenerateMigration(d *diff.SchemaDiff, desired *model.Schema, version string
 				Down:  &DownOp{Irreversible: true},
 			}
 			m.DDLOps = append(m.DDLOps, op)
-			diags = append(diags, classifyOp(op, risk.OpDropCheck, risk.OpContext{})...)
+			diags = append(diags, classifyOp(op, risk.OpDropCheck, ctx)...)
 		}
 
 		// Removed columns.
@@ -295,19 +312,74 @@ func GenerateMigration(d *diff.SchemaDiff, desired *model.Schema, version string
 				Down:   &DownOp{Irreversible: true},
 			}
 			m.DDLOps = append(m.DDLOps, op)
-			diags = append(diags, classifyOp(op, risk.OpDropColumn, risk.OpContext{})...)
+			diags = append(diags, classifyOp(op, risk.OpDropColumn, ctx)...)
+		}
+
+		// Partition changes.
+		if td.PartitioningChanged != nil {
+			pd := td.PartitioningChanged
+
+			// Strategy change: emit warning, not yet supported.
+			if pd.StrategyChanged != nil {
+				diags = append(diags, diagnostic.Diagnostic{
+					Severity: diagnostic.Warning,
+					Code:     "PARTITION_STRATEGY_CHANGE",
+					Table:    td.Name,
+					Message:  fmt.Sprintf("partition strategy change on %s (%s -> %s) requires table rebuild (not yet supported)", td.Name, pd.StrategyChanged[0], pd.StrategyChanged[1]),
+				})
+			}
+
+			// Added partition children.
+			parentTable := findTable(desired, td.Name)
+			for _, childKey := range pd.ChildrenAdded {
+				childSpec := findPartitionChild(parentTable, childKey)
+				if childSpec == nil {
+					diags = append(diags, diagnostic.Diagnostic{
+						Severity: diagnostic.Warning,
+						Code:     "PARTITION_CHILD_NOT_FOUND",
+						Table:    td.Name,
+						Message:  fmt.Sprintf("partition child %q not found in desired schema for %s", childKey, td.Name),
+					})
+					continue
+				}
+				childName := partitionChildQualifiedName(td.Name, childSpec)
+				op := DDLOp{
+					Op:                 "create_partition",
+					Table:              td.Name,
+					ParentTable:        td.Name,
+					PartitionChildSpec: childSpec,
+					Down: &DownOp{
+						Ops: []DDLOp{{Op: "drop_table", Table: childName}},
+					},
+				}
+				m.DDLOps = append(m.DDLOps, op)
+				diags = append(diags, classifyOp(op, risk.OpCreateTable, ctx)...)
+			}
+
+			// Removed partition children.
+			for _, childKey := range pd.ChildrenRemoved {
+				childName := partitionChildNameFromKey(td.Name, childKey)
+				op := DDLOp{
+					Op:    "drop_table",
+					Table: childName,
+					Down:  &DownOp{Irreversible: true},
+				}
+				m.DDLOps = append(m.DDLOps, op)
+				diags = append(diags, classifyOp(op, risk.OpDropTable, ctx)...)
+			}
 		}
 	}
 
 	// Phase 3: Drops (enums last, tables before enums).
 	for _, tableName := range d.TablesRemoved {
+		ctx := tableCtx(tableName)
 		op := DDLOp{
 			Op:    "drop_table",
 			Table: tableName,
 			Down:  &DownOp{Irreversible: true},
 		}
 		m.DDLOps = append(m.DDLOps, op)
-		diags = append(diags, classifyOp(op, risk.OpDropTable, risk.OpContext{})...)
+		diags = append(diags, classifyOp(op, risk.OpDropTable, ctx)...)
 	}
 
 	for _, enumName := range d.EnumsRemoved {
@@ -382,6 +454,22 @@ func makeCheckOp(tableName string, ck model.CheckConstraint) DDLOp {
 			Ops: []DDLOp{{Op: "drop_check", Table: tableName, Name: ck.Name}},
 		},
 	}
+}
+
+// checkE215 emits an E215 diagnostic when an add_fk op targets a table with
+// more rows than the threshold. The diagnostic warns that ADD CONSTRAINT
+// without NOT VALID will lock the table during validation.
+func checkE215(op DDLOp, ctx risk.OpContext, threshold int64) []diagnostic.Diagnostic {
+	if op.Op != "add_fk" || ctx.EstimatedRows <= threshold {
+		return nil
+	}
+	return []diagnostic.Diagnostic{{
+		Severity:   diagnostic.Warning,
+		Code:       "E215",
+		Table:      opTarget(op),
+		Message:    fmt.Sprintf("ADD CONSTRAINT without NOT VALID on table with %d rows will lock the table; consider NOT VALID + VALIDATE CONSTRAINT", ctx.EstimatedRows),
+		Suggestion: "Add with NOT VALID, then VALIDATE CONSTRAINT in a separate step",
+	}}
 }
 
 func classifyOp(op DDLOp, opType risk.OpType, ctx risk.OpContext) []diagnostic.Diagnostic {
@@ -491,4 +579,62 @@ func generateDescription(d *diff.SchemaDiff) string {
 		return "Schema migration"
 	}
 	return strings.Join(parts, ". ")
+}
+
+// partitionChildKey returns the key used to identify a partition child in diffs.
+// Must match diff.partitionChildKey exactly.
+func partitionChildKey(ps *model.PartitionSpec) string {
+	if ps.Strategy != "" && ps.Column != "" {
+		return ps.Strategy + ":" + ps.Column
+	}
+	if ps.Strategy != "" {
+		return ps.Strategy
+	}
+	return ps.Column
+}
+
+// findPartitionChild looks up a partition child spec by its diff key in the
+// parent table's partitioning configuration.
+func findPartitionChild(table *model.Table, childKey string) *model.PartitionSpec {
+	if table == nil || table.Partitioning == nil {
+		return nil
+	}
+	for i := range table.Partitioning.Children {
+		child := &table.Partitioning.Children[i]
+		if partitionChildKey(child) == childKey {
+			return child
+		}
+	}
+	return nil
+}
+
+// partitionChildQualifiedName derives the schema-qualified child table name
+// from the parent table name and child spec. Uses the child's Name field if
+// set, otherwise falls back to the Strategy field (which some specs use as
+// the child table name).
+func partitionChildQualifiedName(parentQualified string, child *model.PartitionSpec) string {
+	schema, _ := splitQualifiedName(parentQualified)
+	childName := child.Name
+	if childName == "" {
+		childName = child.Strategy
+	}
+	if schema != "" && schema != "public" {
+		return schema + "." + childName
+	}
+	return childName
+}
+
+// partitionChildNameFromKey extracts the child table name from a diff key and
+// qualifies it with the parent's schema. The key format is "name:bound" or
+// just "name".
+func partitionChildNameFromKey(parentQualified string, childKey string) string {
+	schema, _ := splitQualifiedName(parentQualified)
+	childName := childKey
+	if idx := strings.IndexByte(childKey, ':'); idx >= 0 {
+		childName = childKey[:idx]
+	}
+	if schema != "" && schema != "public" {
+		return schema + "." + childName
+	}
+	return childName
 }

@@ -36,7 +36,7 @@ func TestGenerateMigration_AddTable(t *testing.T) {
 		TablesAdded: []string{"game.players"},
 	}
 
-	m, diags := GenerateMigration(d, desired, "0.1.0")
+	m, diags := GenerateMigration(d, desired, "0.1.0", nil, 0)
 	if m == nil {
 		t.Fatal("expected non-nil migration")
 	}
@@ -99,7 +99,7 @@ func TestGenerateMigration_AddColumn(t *testing.T) {
 		},
 	}
 
-	m, _ := GenerateMigration(d, desired, "0.2.0")
+	m, _ := GenerateMigration(d, desired, "0.2.0", nil, 0)
 	if m == nil {
 		t.Fatal("expected non-nil migration")
 	}
@@ -153,7 +153,7 @@ func TestGenerateMigration_AddColumnPGVersionRisk(t *testing.T) {
 		},
 	}
 
-	_, diags := GenerateMigration(d, desired, "0.2.0")
+	_, diags := GenerateMigration(d, desired, "0.2.0", nil, 0)
 
 	// PG11 with constant default: should be safe, no risk diagnostics.
 	for _, diag := range diags {
@@ -192,7 +192,7 @@ func TestGenerateMigration_AddColumnPrePG11Risk(t *testing.T) {
 		},
 	}
 
-	_, diags := GenerateMigration(d, desired, "0.2.0")
+	_, diags := GenerateMigration(d, desired, "0.2.0", nil, 0)
 
 	// PG9 with constant default: should be dangerous, expect risk diagnostic.
 	hasDangerous := false
@@ -213,7 +213,7 @@ func TestGenerateMigration_DropTable(t *testing.T) {
 		TablesRemoved: []string{"game.old_table"},
 	}
 
-	m, diags := GenerateMigration(d, desired, "0.3.0")
+	m, diags := GenerateMigration(d, desired, "0.3.0", nil, 0)
 	if m == nil {
 		t.Fatal("expected non-nil migration")
 	}
@@ -243,6 +243,225 @@ func TestGenerateMigration_DropTable(t *testing.T) {
 	if !hasDangerous {
 		t.Error("expected dangerous diagnostic for drop_table")
 	}
+}
+
+func TestGenerateMigration_PartitionChildAdded(t *testing.T) {
+	desired := &model.Schema{
+		Name: "public",
+		Tables: []model.Table{
+			{
+				Name:   "events",
+				Schema: "public",
+				PK:     []string{"id"},
+				Columns: []model.Column{
+					{Name: "id", PGType: "bigint", NotNull: true},
+					{Name: "created_at", PGType: "timestamptz", NotNull: true},
+				},
+				Partitioning: &model.PartitionSpec{
+					Strategy: "range",
+					Column:   "created_at",
+					Children: []model.PartitionSpec{
+						{Strategy: "events_2024", Column: "2024-01-01"},
+						{Strategy: "events_2025", Column: "2025-01-01"},
+					},
+				},
+			},
+		},
+	}
+
+	d := &diff.SchemaDiff{
+		TablesChanged: []diff.TableDiff{
+			{
+				Name: "events",
+				PartitioningChanged: &diff.PartitionDiff{
+					ChildrenAdded: []string{"events_2025:2025-01-01"},
+				},
+			},
+		},
+	}
+
+	m, diags := GenerateMigration(d, desired, "0.4.0", nil, 0)
+	if m == nil {
+		t.Fatal("expected non-nil migration")
+	}
+
+	// Should have a create_partition op.
+	found := false
+	for _, op := range m.DDLOps {
+		if op.Op == "create_partition" && op.ParentTable == "events" {
+			found = true
+			if op.PartitionChildSpec == nil {
+				t.Error("create_partition op has no PartitionChildSpec")
+			} else if op.PartitionChildSpec.Strategy != "events_2025" {
+				t.Errorf("child spec strategy = %q, want events_2025", op.PartitionChildSpec.Strategy)
+			}
+			if op.Down == nil {
+				t.Error("create_partition op has no down op")
+			} else if len(op.Down.Ops) == 0 {
+				t.Error("create_partition down has no ops")
+			} else if op.Down.Ops[0].Op != "drop_table" {
+				t.Errorf("create_partition down op = %q, want drop_table", op.Down.Ops[0].Op)
+			}
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected create_partition op, got ops: %v", opsDebug(m.DDLOps))
+	}
+
+	// Should not have error diagnostics (creating a partition is safe).
+	for _, diag := range diags {
+		if diag.Code == "MIGRATE_RISK" && diag.Severity == 0 { // Error
+			t.Errorf("unexpected error diagnostic: %s", diag.Message)
+		}
+	}
+}
+
+func TestGenerateMigration_PartitionChildRemoved(t *testing.T) {
+	desired := &model.Schema{
+		Name: "public",
+		Tables: []model.Table{
+			{
+				Name:   "events",
+				Schema: "public",
+				PK:     []string{"id"},
+				Columns: []model.Column{
+					{Name: "id", PGType: "bigint", NotNull: true},
+					{Name: "created_at", PGType: "timestamptz", NotNull: true},
+				},
+				Partitioning: &model.PartitionSpec{
+					Strategy: "range",
+					Column:   "created_at",
+					Children: []model.PartitionSpec{
+						{Strategy: "events_2024", Column: "2024-01-01"},
+					},
+				},
+			},
+		},
+	}
+
+	d := &diff.SchemaDiff{
+		TablesChanged: []diff.TableDiff{
+			{
+				Name: "events",
+				PartitioningChanged: &diff.PartitionDiff{
+					ChildrenRemoved: []string{"events_2023:2023-01-01"},
+				},
+			},
+		},
+	}
+
+	m, diags := GenerateMigration(d, desired, "0.5.0", nil, 0)
+	if m == nil {
+		t.Fatal("expected non-nil migration")
+	}
+
+	// Should have a drop_table op for the removed child.
+	found := false
+	for _, op := range m.DDLOps {
+		if op.Op == "drop_table" && op.Table == "events_2023" {
+			found = true
+			if op.Down == nil || !op.Down.Irreversible {
+				t.Error("drop_table for partition child should have irreversible down")
+			}
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected drop_table op for events_2023, got ops: %v", opsDebug(m.DDLOps))
+	}
+
+	// Should have a dangerous diagnostic for drop_table.
+	hasDangerous := false
+	for _, diag := range diags {
+		if strings.Contains(diag.Message, "drop_table") {
+			hasDangerous = true
+			break
+		}
+	}
+	if !hasDangerous {
+		t.Error("expected dangerous diagnostic for drop_table on partition child")
+	}
+}
+
+func TestGenerateMigration_PartitionStrategyChanged(t *testing.T) {
+	desired := &model.Schema{
+		Name: "public",
+		Tables: []model.Table{
+			{
+				Name:   "events",
+				Schema: "public",
+				Partitioning: &model.PartitionSpec{
+					Strategy: "hash",
+					Column:   "id",
+				},
+			},
+		},
+	}
+
+	d := &diff.SchemaDiff{
+		TablesChanged: []diff.TableDiff{
+			{
+				Name: "events",
+				PartitioningChanged: &diff.PartitionDiff{
+					StrategyChanged: &[2]string{"range", "hash"},
+				},
+			},
+		},
+	}
+
+	_, diags := GenerateMigration(d, desired, "0.6.0", nil, 0)
+
+	// Should have a warning about strategy change.
+	hasWarning := false
+	for _, diag := range diags {
+		if diag.Code == "PARTITION_STRATEGY_CHANGE" {
+			hasWarning = true
+			if !strings.Contains(diag.Message, "requires table rebuild") {
+				t.Errorf("expected 'requires table rebuild' in message, got: %s", diag.Message)
+			}
+			break
+		}
+	}
+	if !hasWarning {
+		t.Error("expected PARTITION_STRATEGY_CHANGE diagnostic")
+	}
+}
+
+func TestOpToSQL_CreatePartition(t *testing.T) {
+	childSpec := &model.PartitionSpec{
+		Name:  "events_2025",
+		Bound: "FROM ('2025-01-01') TO ('2026-01-01')",
+	}
+	op := DDLOp{
+		Op:                 "create_partition",
+		Table:              "public.events",
+		ParentTable:        "public.events",
+		PartitionChildSpec: childSpec,
+	}
+
+	result := OpToSQL(op)
+	if !strings.Contains(result, "CREATE TABLE") {
+		t.Errorf("expected CREATE TABLE, got: %s", result)
+	}
+	if !strings.Contains(result, "PARTITION OF") {
+		t.Errorf("expected PARTITION OF, got: %s", result)
+	}
+	if !strings.Contains(result, "events_2025") {
+		t.Errorf("expected child table name, got: %s", result)
+	}
+	if !strings.Contains(result, "FOR VALUES") {
+		t.Errorf("expected FOR VALUES, got: %s", result)
+	}
+}
+
+// opsDebug returns a string summary of ops for test failure messages.
+func opsDebug(ops []DDLOp) string {
+	var parts []string
+	for _, op := range ops {
+		parts = append(parts, fmt.Sprintf("{Op:%s Table:%s}", op.Op, op.Table))
+	}
+	return strings.Join(parts, ", ")
 }
 
 func TestParseMigrationRoundtrip(t *testing.T) {

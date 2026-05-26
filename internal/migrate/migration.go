@@ -37,7 +37,9 @@ type DDLOp struct {
 	Schema   string   // for enums (schema-qualified ops)
 	Expr     string   // for check constraints
 
-	TableDef *model.Table // full table def for create_table (not serialized)
+	TableDef          *model.Table          // full table def for create_table (not serialized)
+	PartitionChildSpec *model.PartitionSpec // child spec for create_partition (not serialized)
+	ParentTable       string               // parent table for create_partition
 
 	Down *DownOp
 }
