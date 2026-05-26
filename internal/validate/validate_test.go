@@ -743,6 +743,126 @@ func TestE211_IndexNamingViolation(t *testing.T) {
 	}
 }
 
+func TestE213_GeneratedColRefsGenerated(t *testing.T) {
+	schema := &model.Schema{
+		Tables: []model.Table{{
+			Name:    "users",
+			Schema:  "public",
+			Comment: "Users table",
+			PK:      []string{"id"},
+			Columns: []model.Column{
+				{Name: "id", PGType: "uuid"},
+				{Name: "first_name", PGType: "text"},
+				{Name: "last_name", PGType: "text"},
+				{Name: "full_name", PGType: "text", Generated: "first_name || ' ' || last_name", Stored: true},
+				{Name: "display_name", PGType: "text", Generated: "lower(full_name)", Stored: true},
+				{Name: "created_at", PGType: "timestamptz"},
+			},
+		}},
+	}
+
+	diags := Validate(schema, nil)
+	found := findByCode(diags, "E213")
+	if len(found) == 0 {
+		t.Fatal("expected E213 for generated column referencing another generated column")
+	}
+	if found[0].Column != "display_name" {
+		t.Errorf("expected column 'display_name', got %q", found[0].Column)
+	}
+}
+
+func TestE213_GeneratedColRefsRegular_NoDiag(t *testing.T) {
+	schema := &model.Schema{
+		Tables: []model.Table{{
+			Name:    "users",
+			Schema:  "public",
+			Comment: "Users table",
+			PK:      []string{"id"},
+			Columns: []model.Column{
+				{Name: "id", PGType: "uuid"},
+				{Name: "first_name", PGType: "text"},
+				{Name: "last_name", PGType: "text"},
+				{Name: "full_name", PGType: "text", Generated: "first_name || ' ' || last_name", Stored: true},
+				{Name: "created_at", PGType: "timestamptz"},
+			},
+		}},
+	}
+
+	diags := Validate(schema, nil)
+	found := findByCode(diags, "E213")
+	if len(found) > 0 {
+		t.Fatalf("expected no E213 when generated column only references regular columns, got %v", found)
+	}
+}
+
+func TestE213_GeneratedColWithFunctionCalls_NoDiag(t *testing.T) {
+	// Function names like "lower" should not be mistakenly treated as column references.
+	schema := &model.Schema{
+		Tables: []model.Table{{
+			Name:    "products",
+			Schema:  "public",
+			Comment: "Products table",
+			PK:      []string{"id"},
+			Columns: []model.Column{
+				{Name: "id", PGType: "uuid"},
+				{Name: "name", PGType: "text"},
+				{Name: "price", PGType: "numeric"},
+				{Name: "search_name", PGType: "text", Generated: "lower(name)", Stored: true},
+				{Name: "display_price", PGType: "text", Generated: "cast(price as text) || ' USD'", Stored: true},
+				{Name: "created_at", PGType: "timestamptz"},
+			},
+		}},
+	}
+
+	diags := Validate(schema, nil)
+	found := findByCode(diags, "E213")
+	if len(found) > 0 {
+		t.Fatalf("expected no E213 when generated columns only reference regular columns, got %v", found)
+	}
+}
+
+func TestExtractColumnRefs(t *testing.T) {
+	tests := []struct {
+		expr string
+		want []string
+	}{
+		{
+			expr: "first_name || ' ' || last_name",
+			want: []string{"first_name", "last_name"},
+		},
+		{
+			expr: "lower(first_name || ' ' || last_name)",
+			want: []string{"first_name", "last_name"},
+		},
+		{
+			expr: "COALESCE(nickname, first_name)",
+			want: []string{"nickname", "first_name"},
+		},
+		{
+			expr: "price * quantity",
+			want: []string{"price", "quantity"},
+		},
+		{
+			expr: "CASE WHEN status = 'active' THEN 1 ELSE 0 END",
+			want: []string{"status"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.expr, func(t *testing.T) {
+			got := extractColumnRefs(tt.expr)
+			if len(got) != len(tt.want) {
+				t.Fatalf("extractColumnRefs(%q) = %v, want %v", tt.expr, got, tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Errorf("extractColumnRefs(%q)[%d] = %q, want %q", tt.expr, i, got[i], tt.want[i])
+				}
+			}
+		})
+	}
+}
+
 // --- Helpers ---
 
 func findByCode(diags []diagnostic.Diagnostic, code string) []diagnostic.Diagnostic {

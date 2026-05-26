@@ -67,6 +67,7 @@ func Validate(schema *model.Schema, config *Config) []diagnostic.Diagnostic {
 		{"E210", checkFloatMoney},
 		{"E211", checkNamingConvention},
 		{"E212", checkFKMissingIndex},
+		{"E213", checkGeneratedColRefsGenerated},
 		{"E214", checkOpclassMissingExtension},
 		{"W001", checkGodTable},
 		{"W002", checkOrphanTable},
@@ -387,6 +388,103 @@ func checkFKMissingIndex(schema *model.Schema, _ *Config) []diagnostic.Diagnosti
 					Message:    "FK " + fk.Name + " columns have no covering index",
 					Suggestion: "Add an index on (" + strings.Join(fk.Columns, ", ") + ")",
 				})
+			}
+		}
+	}
+	return diags
+}
+
+// sqlKeywords is the set of SQL keywords to exclude when extracting column identifiers.
+var sqlKeywords = map[string]bool{
+	"select": true, "from": true, "where": true, "and": true, "or": true,
+	"not": true, "null": true, "true": true, "false": true, "case": true,
+	"when": true, "then": true, "else": true, "end": true, "as": true,
+	"in": true, "is": true, "like": true, "ilike": true, "between": true,
+	"cast": true, "coalesce": true, "nullif": true, "exists": true,
+	"any": true, "all": true, "some": true, "distinct": true,
+	"asc": true, "desc": true, "limit": true, "offset": true,
+	"union": true, "intersect": true, "except": true,
+	"having": true, "group": true, "by": true, "order": true,
+	"inner": true, "outer": true, "left": true, "right": true,
+	"join": true, "on": true, "using": true, "natural": true,
+	"cross": true, "full": true, "with": true, "recursive": true,
+	"insert": true, "into": true, "update": true, "delete": true,
+	"set": true, "values": true, "returning": true,
+	"create": true, "alter": true, "drop": true, "table": true,
+	"index": true, "view": true, "type": true, "stored": true,
+}
+
+// identPattern matches SQL identifiers (letters, digits, underscores, starting with letter or underscore).
+var identPattern = regexp.MustCompile(`[a-zA-Z_][a-zA-Z0-9_]*`)
+
+// stringLiteralPattern matches single-quoted SQL string literals (including escaped quotes).
+var stringLiteralPattern = regexp.MustCompile(`'[^']*'`)
+
+// extractColumnRefs extracts potential column name references from a SQL expression.
+// It finds all identifier tokens, then filters out SQL keywords and function calls
+// (identifiers immediately followed by an open parenthesis).
+func extractColumnRefs(expr string) []string {
+	// Replace string literals with spaces to avoid extracting identifiers from them.
+	cleaned := stringLiteralPattern.ReplaceAllStringFunc(expr, func(s string) string {
+		return strings.Repeat(" ", len(s))
+	})
+
+	// Find all identifier matches with their positions.
+	matches := identPattern.FindAllStringIndex(cleaned, -1)
+	var refs []string
+	for _, loc := range matches {
+		token := cleaned[loc[0]:loc[1]]
+		tokenLower := strings.ToLower(token)
+
+		// Skip SQL keywords.
+		if sqlKeywords[tokenLower] {
+			continue
+		}
+
+		// Skip function names: identifier immediately followed by '('.
+		rest := cleaned[loc[1]:]
+		trimmed := strings.TrimLeft(rest, " \t")
+		if len(trimmed) > 0 && trimmed[0] == '(' {
+			continue
+		}
+
+		refs = append(refs, tokenLower)
+	}
+	return refs
+}
+
+// checkGeneratedColRefsGenerated (E213): generated column expression references another generated column.
+func checkGeneratedColRefsGenerated(schema *model.Schema, _ *Config) []diagnostic.Diagnostic {
+	var diags []diagnostic.Diagnostic
+	for _, t := range schema.Tables {
+		// Build set of generated column names for this table.
+		genCols := make(map[string]bool)
+		for _, col := range t.Columns {
+			if col.Generated != "" {
+				genCols[col.Name] = true
+			}
+		}
+		if len(genCols) < 2 {
+			continue
+		}
+
+		// Check each generated column's expression for references to other generated columns.
+		for _, col := range t.Columns {
+			if col.Generated == "" {
+				continue
+			}
+			refs := extractColumnRefs(col.Generated)
+			for _, ref := range refs {
+				if ref != col.Name && genCols[ref] {
+					diags = append(diags, diagnostic.Diagnostic{
+						Severity:   diagnostic.Error,
+						Code:       "E213",
+						Table:      t.Name,
+						Column:     col.Name,
+						Message:    fmt.Sprintf("generated column %q references another generated column %q", col.Name, ref),
+						Suggestion: "Generated columns should only reference regular (non-generated) columns",
+					})
+				}
 			}
 		}
 	}
