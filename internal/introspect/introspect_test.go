@@ -146,7 +146,7 @@ func TestMain(m *testing.M) {
 }
 
 func TestIntrospectTables(t *testing.T) {
-	schema, diags, err := Introspect(testConnStr, []string{testSchema})
+	schema, diags, err := Introspect(context.Background(), testConnStr, []string{testSchema})
 	if err != nil {
 		t.Fatalf("Introspect failed: %v", err)
 	}
@@ -179,7 +179,7 @@ func TestIntrospectTables(t *testing.T) {
 }
 
 func TestIntrospectColumns(t *testing.T) {
-	schema, _, err := Introspect(testConnStr, []string{testSchema})
+	schema, _, err := Introspect(context.Background(), testConnStr, []string{testSchema})
 	if err != nil {
 		t.Fatalf("Introspect failed: %v", err)
 	}
@@ -228,7 +228,7 @@ func TestIntrospectColumns(t *testing.T) {
 }
 
 func TestIntrospectPrimaryKey(t *testing.T) {
-	schema, _, err := Introspect(testConnStr, []string{testSchema})
+	schema, _, err := Introspect(context.Background(), testConnStr, []string{testSchema})
 	if err != nil {
 		t.Fatalf("Introspect failed: %v", err)
 	}
@@ -244,7 +244,7 @@ func TestIntrospectPrimaryKey(t *testing.T) {
 }
 
 func TestIntrospectForeignKeys(t *testing.T) {
-	schema, _, err := Introspect(testConnStr, []string{testSchema})
+	schema, _, err := Introspect(context.Background(), testConnStr, []string{testSchema})
 	if err != nil {
 		t.Fatalf("Introspect failed: %v", err)
 	}
@@ -280,7 +280,7 @@ func TestIntrospectForeignKeys(t *testing.T) {
 }
 
 func TestIntrospectIndexes(t *testing.T) {
-	schema, _, err := Introspect(testConnStr, []string{testSchema})
+	schema, _, err := Introspect(context.Background(), testConnStr, []string{testSchema})
 	if err != nil {
 		t.Fatalf("Introspect failed: %v", err)
 	}
@@ -320,7 +320,7 @@ type indexInfo struct {
 }
 
 func TestIntrospectUniqueConstraints(t *testing.T) {
-	schema, _, err := Introspect(testConnStr, []string{testSchema})
+	schema, _, err := Introspect(context.Background(), testConnStr, []string{testSchema})
 	if err != nil {
 		t.Fatalf("Introspect failed: %v", err)
 	}
@@ -344,7 +344,7 @@ func TestIntrospectUniqueConstraints(t *testing.T) {
 }
 
 func TestIntrospectCheckConstraints(t *testing.T) {
-	schema, _, err := Introspect(testConnStr, []string{testSchema})
+	schema, _, err := Introspect(context.Background(), testConnStr, []string{testSchema})
 	if err != nil {
 		t.Fatalf("Introspect failed: %v", err)
 	}
@@ -369,7 +369,7 @@ func TestIntrospectCheckConstraints(t *testing.T) {
 }
 
 func TestIntrospectEnums(t *testing.T) {
-	schema, _, err := Introspect(testConnStr, []string{testSchema})
+	schema, _, err := Introspect(context.Background(), testConnStr, []string{testSchema})
 	if err != nil {
 		t.Fatalf("Introspect failed: %v", err)
 	}
@@ -394,7 +394,7 @@ func TestIntrospectEnums(t *testing.T) {
 }
 
 func TestIntrospectTableComment(t *testing.T) {
-	schema, _, err := Introspect(testConnStr, []string{testSchema})
+	schema, _, err := Introspect(context.Background(), testConnStr, []string{testSchema})
 	if err != nil {
 		t.Fatalf("Introspect failed: %v", err)
 	}
@@ -409,7 +409,7 @@ func TestIntrospectTableComment(t *testing.T) {
 }
 
 func TestExport(t *testing.T) {
-	schema, _, err := Introspect(testConnStr, []string{testSchema})
+	schema, _, err := Introspect(context.Background(), testConnStr, []string{testSchema})
 	if err != nil {
 		t.Fatalf("Introspect failed: %v", err)
 	}
@@ -589,7 +589,7 @@ func TestResolvePartColumn(t *testing.T) {
 // --- Integration tests for partition introspection ---
 
 func TestIntrospectRangePartitioning(t *testing.T) {
-	schema, _, err := Introspect(testConnStr, []string{testSchema})
+	schema, _, err := Introspect(context.Background(), testConnStr, []string{testSchema})
 	if err != nil {
 		t.Fatalf("Introspect failed: %v", err)
 	}
@@ -627,7 +627,7 @@ func TestIntrospectRangePartitioning(t *testing.T) {
 }
 
 func TestIntrospectListPartitioning(t *testing.T) {
-	schema, _, err := Introspect(testConnStr, []string{testSchema})
+	schema, _, err := Introspect(context.Background(), testConnStr, []string{testSchema})
 	if err != nil {
 		t.Fatalf("Introspect failed: %v", err)
 	}
@@ -654,7 +654,7 @@ func TestIntrospectListPartitioning(t *testing.T) {
 }
 
 func TestIntrospectRegularTableNoPartitioning(t *testing.T) {
-	schema, _, err := Introspect(testConnStr, []string{testSchema})
+	schema, _, err := Introspect(context.Background(), testConnStr, []string{testSchema})
 	if err != nil {
 		t.Fatalf("Introspect failed: %v", err)
 	}

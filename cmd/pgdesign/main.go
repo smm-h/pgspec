@@ -688,7 +688,8 @@ func handleIntrospect(kwargs map[string]interface{}) int {
 		schemaNames = []string{"public"}
 	}
 
-	schema, diags, err := introspect.Introspect(dbURL, schemaNames)
+	ctx := context.Background()
+	schema, diags, err := introspect.Introspect(ctx, dbURL, schemaNames)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		return 1
@@ -749,7 +750,8 @@ func handleDiff(kwargs map[string]interface{}) int {
 		schemaNames = cfgNames
 	}
 
-	actual, diags, err := introspect.Introspect(dbURL, schemaNames)
+	ctx := context.Background()
+	actual, diags, err := introspect.Introspect(ctx, dbURL, schemaNames)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		return 1
@@ -798,7 +800,8 @@ func handleMigratePlan(kwargs map[string]interface{}) int {
 		schemaNames = cfgNames
 	}
 
-	actual, diags, err := introspect.Introspect(dbURL, schemaNames)
+	ctx := context.Background()
+	actual, diags, err := introspect.Introspect(ctx, dbURL, schemaNames)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		return 1
@@ -887,7 +890,8 @@ func handleMigrateGenerate(kwargs map[string]interface{}) int {
 		schemaNames = cfgNames
 	}
 
-	actual, diags, err := introspect.Introspect(dbURL, schemaNames)
+	ctx := context.Background()
+	actual, diags, err := introspect.Introspect(ctx, dbURL, schemaNames)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		return 1

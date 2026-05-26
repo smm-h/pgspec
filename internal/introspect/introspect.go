@@ -15,10 +15,9 @@ import (
 )
 
 // Introspect connects to a PostgreSQL database, extracts schema information
-// for the given schema names, and returns a unified model.Schema.
-func Introspect(connStr string, schemaNames []string) (*model.Schema, []diagnostic.Diagnostic, error) {
-	ctx := context.Background()
-
+// for the given schema names, and returns a unified model.Schema. The provided
+// context controls connection and query timeouts.
+func Introspect(ctx context.Context, connStr string, schemaNames []string) (*model.Schema, []diagnostic.Diagnostic, error) {
 	conn, err := pgx.Connect(ctx, connStr)
 	if err != nil {
 		return nil, nil, fmt.Errorf("connect: %w", err)

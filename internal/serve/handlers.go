@@ -41,7 +41,7 @@ func (s *Server) connStr() string {
 
 // handleSchema introspects the DB and returns the full IR as JSON.
 func (s *Server) handleSchema(w http.ResponseWriter, r *http.Request) {
-	schema, diags, err := introspect.Introspect(s.connStr(), s.schemas)
+	schema, diags, err := introspect.Introspect(r.Context(), s.connStr(), s.schemas)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("introspect: %v", err))
 		return
@@ -56,7 +56,7 @@ func (s *Server) handleSchema(w http.ResponseWriter, r *http.Request) {
 
 // handleSchemaD2 introspects the DB and returns D2 text.
 func (s *Server) handleSchemaD2(w http.ResponseWriter, r *http.Request) {
-	schema, _, err := introspect.Introspect(s.connStr(), s.schemas)
+	schema, _, err := introspect.Introspect(r.Context(), s.connStr(), s.schemas)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("introspect: %v", err))
 		return
@@ -70,7 +70,7 @@ func (s *Server) handleSchemaD2(w http.ResponseWriter, r *http.Request) {
 
 // handleSchemaSVG introspects the DB, generates D2, and renders SVG.
 func (s *Server) handleSchemaSVG(w http.ResponseWriter, r *http.Request) {
-	schema, _, err := introspect.Introspect(s.connStr(), s.schemas)
+	schema, _, err := introspect.Introspect(r.Context(), s.connStr(), s.schemas)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("introspect: %v", err))
 		return
@@ -324,7 +324,7 @@ func (s *Server) handleDiff(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	actual, _, err := introspect.Introspect(s.connStr(), s.schemas)
+	actual, _, err := introspect.Introspect(r.Context(), s.connStr(), s.schemas)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("introspect: %v", err))
 		return
@@ -336,7 +336,7 @@ func (s *Server) handleDiff(w http.ResponseWriter, r *http.Request) {
 
 // handleAudit introspects the live DB, runs discover (TANE) + audit, returns diagnostics.
 func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
-	schema, _, err := introspect.Introspect(s.connStr(), s.schemas)
+	schema, _, err := introspect.Introspect(r.Context(), s.connStr(), s.schemas)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("introspect: %v", err))
 		return
