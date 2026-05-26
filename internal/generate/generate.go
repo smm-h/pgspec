@@ -106,7 +106,38 @@ func generateSQL(schema *model.Schema, opts Options) string {
 		sections = append(sections, strings.Join(tableStmts, "\n\n"))
 	}
 
-	// 5. ALTER TABLE ADD CONSTRAINT ... FOREIGN KEY
+	// 5. CREATE TABLE ... PARTITION OF (child partitions)
+	var partStmts []string
+	for i := range tables {
+		t := &tables[i]
+		if t.Partitioning != nil && len(t.Partitioning.Children) > 0 {
+			collectPartitionChildren(t.Schema, t.Name, t.Partitioning.Children, opts.Idempotent, &partStmts)
+		}
+	}
+	if len(partStmts) > 0 {
+		sections = append(sections, strings.Join(partStmts, "\n"))
+	}
+
+	// 5b. pg_partman configuration
+	var partmanStmts []string
+	for i := range tables {
+		t := &tables[i]
+		if t.Maintenance != nil && t.Partitioning != nil && hasExtension(schema, "pg_partman") {
+			partmanStmts = append(partmanStmts,
+				sql.CreatePartmanParent(t.Schema, t.Name, t.Partitioning.Column,
+					t.Maintenance.Retention, t.Maintenance.Premake))
+			if t.Maintenance.Retention != "" {
+				partmanStmts = append(partmanStmts,
+					sql.UpdatePartmanConfig(t.Schema, t.Name,
+						t.Maintenance.Retention, t.Maintenance.RetentionKeepTable))
+			}
+		}
+	}
+	if len(partmanStmts) > 0 {
+		sections = append(sections, strings.Join(partmanStmts, "\n\n"))
+	}
+
+	// 6. ALTER TABLE ADD CONSTRAINT ... FOREIGN KEY
 	var fkStmts []string
 	for i := range tables {
 		t := &tables[i]
@@ -120,7 +151,7 @@ func generateSQL(schema *model.Schema, opts Options) string {
 		sections = append(sections, strings.Join(fkStmts, "\n"))
 	}
 
-	// 6. ALTER TABLE ADD CONSTRAINT ... UNIQUE
+	// 7. ALTER TABLE ADD CONSTRAINT ... UNIQUE
 	var uqStmts []string
 	for i := range tables {
 		t := &tables[i]
@@ -134,7 +165,7 @@ func generateSQL(schema *model.Schema, opts Options) string {
 		sections = append(sections, strings.Join(uqStmts, "\n"))
 	}
 
-	// 7. ALTER TABLE ADD CONSTRAINT ... CHECK
+	// 8. ALTER TABLE ADD CONSTRAINT ... CHECK
 	var ckStmts []string
 	for i := range tables {
 		t := &tables[i]
@@ -148,7 +179,7 @@ func generateSQL(schema *model.Schema, opts Options) string {
 		sections = append(sections, strings.Join(ckStmts, "\n"))
 	}
 
-	// 8. CREATE INDEX (explicit + auto-FK)
+	// 9. CREATE INDEX (explicit + auto-FK)
 	var idxStmts []string
 	for i := range tables {
 		t := &tables[i]
@@ -162,7 +193,7 @@ func generateSQL(schema *model.Schema, opts Options) string {
 		sections = append(sections, strings.Join(idxStmts, "\n"))
 	}
 
-	// 9. COMMENT ON TABLE + COMMENT ON COLUMN
+	// 10. COMMENT ON TABLE + COMMENT ON COLUMN
 	if opts.IncludeComments {
 		var commentStmts []string
 		for i := range tables {
@@ -183,7 +214,7 @@ func generateSQL(schema *model.Schema, opts Options) string {
 		}
 	}
 
-	// 10. ALTER TABLE OWNER TO
+	// 11. ALTER TABLE OWNER TO
 	var ownerStmts []string
 	for i := range tables {
 		t := &tables[i]
@@ -236,4 +267,28 @@ func sortedIndexes(idxs []model.Index) []model.Index {
 		return result[i].Name < result[j].Name
 	})
 	return result
+}
+
+// collectPartitionChildren recursively emits CREATE TABLE ... PARTITION OF
+// statements for all children in the partition tree. For sub-partitions, the
+// parent is the child itself (supporting partitions of partitions).
+func collectPartitionChildren(schemaName, parentTable string, children []model.PartitionSpec, idempotent bool, out *[]string) {
+	for i := range children {
+		child := &children[i]
+		*out = append(*out, sql.CreatePartitionOf(schemaName, child, parentTable, idempotent))
+		// Recurse for sub-partitions (partitions of partitions).
+		if len(child.Children) > 0 {
+			collectPartitionChildren(schemaName, child.Name, child.Children, idempotent, out)
+		}
+	}
+}
+
+// hasExtension returns true if the schema declares the named extension.
+func hasExtension(schema *model.Schema, name string) bool {
+	for _, ext := range schema.Extensions {
+		if ext == name {
+			return true
+		}
+	}
+	return false
 }

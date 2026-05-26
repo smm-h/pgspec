@@ -661,6 +661,208 @@ func TestIdentityColumnPGVersionGate(t *testing.T) {
 	}
 }
 
+func TestPartitionChildrenGeneration(t *testing.T) {
+	schema := &model.Schema{
+		Name: "app",
+		Tables: []model.Table{
+			{
+				Name:   "events",
+				Schema: "app",
+				Columns: []model.Column{
+					{Name: "id", PGType: "bigint", NotNull: true},
+					{Name: "created_at", PGType: "timestamptz", NotNull: true},
+				},
+				PK: []string{"id"},
+				Partitioning: &model.PartitionSpec{
+					Strategy: "range",
+					Column:   "created_at",
+					Children: []model.PartitionSpec{
+						{
+							Name:  "events_2024_01",
+							Bound: "FROM ('2024-01-01') TO ('2024-02-01')",
+						},
+						{
+							Name:  "events_2024_02",
+							Bound: "FROM ('2024-02-01') TO ('2024-03-01')",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	opts := Options{Format: "sql"}
+	out := Generate(schema, opts)
+
+	if !strings.Contains(out, "PARTITION BY RANGE (created_at)") {
+		t.Errorf("expected PARTITION BY on parent table, got:\n%s", out)
+	}
+	if !strings.Contains(out, "CREATE TABLE app.events_2024_01 PARTITION OF app.events") {
+		t.Errorf("expected child partition events_2024_01, got:\n%s", out)
+	}
+	if !strings.Contains(out, "FOR VALUES FROM ('2024-01-01') TO ('2024-02-01')") {
+		t.Errorf("expected bound for events_2024_01, got:\n%s", out)
+	}
+	if !strings.Contains(out, "CREATE TABLE app.events_2024_02 PARTITION OF app.events") {
+		t.Errorf("expected child partition events_2024_02, got:\n%s", out)
+	}
+
+	// Child partitions must come after parent table.
+	parentPos := strings.Index(out, "CREATE TABLE app.events (")
+	childPos := strings.Index(out, "CREATE TABLE app.events_2024_01 PARTITION OF")
+	if parentPos >= childPos {
+		t.Errorf("child partition should appear after parent table, parent=%d child=%d", parentPos, childPos)
+	}
+}
+
+func TestPartitionChildrenRecursive(t *testing.T) {
+	schema := &model.Schema{
+		Name: "app",
+		Tables: []model.Table{
+			{
+				Name:   "events",
+				Schema: "app",
+				Columns: []model.Column{
+					{Name: "id", PGType: "bigint", NotNull: true},
+					{Name: "created_at", PGType: "timestamptz", NotNull: true},
+					{Name: "region", PGType: "text", NotNull: true},
+				},
+				PK: []string{"id"},
+				Partitioning: &model.PartitionSpec{
+					Strategy: "range",
+					Column:   "created_at",
+					Children: []model.PartitionSpec{
+						{
+							Name:     "events_2024",
+							Bound:    "FROM ('2024-01-01') TO ('2025-01-01')",
+							Strategy: "list",
+							Column:   "region",
+							Children: []model.PartitionSpec{
+								{
+									Name:  "events_2024_us",
+									Bound: "IN ('us-east', 'us-west')",
+								},
+								{
+									Name:  "events_2024_eu",
+									Bound: "IN ('eu-west')",
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	opts := Options{Format: "sql"}
+	out := Generate(schema, opts)
+
+	// Parent partition.
+	if !strings.Contains(out, "CREATE TABLE app.events_2024 PARTITION OF app.events") {
+		t.Errorf("expected top-level child partition, got:\n%s", out)
+	}
+	// Sub-partitions of events_2024.
+	if !strings.Contains(out, "CREATE TABLE app.events_2024_us PARTITION OF app.events_2024") {
+		t.Errorf("expected sub-partition events_2024_us, got:\n%s", out)
+	}
+	if !strings.Contains(out, "CREATE TABLE app.events_2024_eu PARTITION OF app.events_2024") {
+		t.Errorf("expected sub-partition events_2024_eu, got:\n%s", out)
+	}
+}
+
+func TestPartmanGeneration(t *testing.T) {
+	schema := &model.Schema{
+		Name:       "app",
+		Extensions: []string{"pg_partman"},
+		Tables: []model.Table{
+			{
+				Name:   "events",
+				Schema: "app",
+				Columns: []model.Column{
+					{Name: "id", PGType: "bigint", NotNull: true},
+					{Name: "created_at", PGType: "timestamptz", NotNull: true},
+				},
+				PK: []string{"id"},
+				Partitioning: &model.PartitionSpec{
+					Strategy: "range",
+					Column:   "created_at",
+				},
+				Maintenance: &model.MaintenanceConfig{
+					Premake:            4,
+					Retention:          "6 months",
+					RetentionKeepTable: true,
+				},
+			},
+		},
+	}
+
+	opts := Options{Format: "sql"}
+	out := Generate(schema, opts)
+
+	if !strings.Contains(out, "partman.create_parent(") {
+		t.Errorf("expected partman.create_parent call, got:\n%s", out)
+	}
+	if !strings.Contains(out, "p_parent_table := 'app.events'") {
+		t.Errorf("expected p_parent_table, got:\n%s", out)
+	}
+	if !strings.Contains(out, "p_control := 'created_at'") {
+		t.Errorf("expected p_control, got:\n%s", out)
+	}
+	if !strings.Contains(out, "p_premake := 4") {
+		t.Errorf("expected p_premake, got:\n%s", out)
+	}
+	if !strings.Contains(out, "UPDATE partman.part_config") {
+		t.Errorf("expected UPDATE partman.part_config, got:\n%s", out)
+	}
+	if !strings.Contains(out, "retention = '6 months'") {
+		t.Errorf("expected retention value, got:\n%s", out)
+	}
+	if !strings.Contains(out, "retention_keep_table = true") {
+		t.Errorf("expected retention_keep_table, got:\n%s", out)
+	}
+
+	// pg_partman SQL must come after CREATE TABLE.
+	tablePos := strings.Index(out, "CREATE TABLE app.events (")
+	partmanPos := strings.Index(out, "partman.create_parent(")
+	if tablePos >= partmanPos {
+		t.Errorf("partman SQL should appear after CREATE TABLE, table=%d partman=%d", tablePos, partmanPos)
+	}
+}
+
+func TestPartmanNotEmittedWithoutExtension(t *testing.T) {
+	// Without pg_partman in extensions, no partman SQL should be emitted.
+	schema := &model.Schema{
+		Name: "app",
+		Tables: []model.Table{
+			{
+				Name:   "events",
+				Schema: "app",
+				Columns: []model.Column{
+					{Name: "id", PGType: "bigint", NotNull: true},
+					{Name: "created_at", PGType: "timestamptz", NotNull: true},
+				},
+				PK: []string{"id"},
+				Partitioning: &model.PartitionSpec{
+					Strategy: "range",
+					Column:   "created_at",
+				},
+				Maintenance: &model.MaintenanceConfig{
+					Premake:            4,
+					Retention:          "6 months",
+					RetentionKeepTable: true,
+				},
+			},
+		},
+	}
+
+	opts := Options{Format: "sql"}
+	out := Generate(schema, opts)
+
+	if strings.Contains(out, "partman") {
+		t.Errorf("should not contain partman SQL without pg_partman extension, got:\n%s", out)
+	}
+}
+
 func TestGoldenFile(t *testing.T) {
 	inputPath := filepath.Join("testdata", "simple_input.toml")
 

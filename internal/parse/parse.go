@@ -797,6 +797,14 @@ func (p *parser) parsePartitioningFromArrayTable(tableName string, at *tomledit.
 			if v, ok := nodeString(kv.Val); ok {
 				part.Column = v
 			}
+		case "name":
+			if v, ok := nodeString(kv.Val); ok {
+				part.Name = v
+			}
+		case "bound":
+			if v, ok := nodeString(kv.Val); ok {
+				part.Bound = v
+			}
 		}
 	}
 
