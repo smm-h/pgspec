@@ -1,0 +1,23 @@
+[meta]
+version = 1
+schema = "test"
+
+[tables.parents]
+comment = "Parent table"
+
+[tables.parents.columns.id]
+type = "id"
+
+[tables.children]
+comment = "Child table with FK missing on_delete"
+
+[tables.children.columns.id]
+type = "id"
+
+[tables.children.columns.parent_id]
+type = "ref"
+
+[tables.children.fks.fk_children_parent]
+columns = ["parent_id"]
+ref_table = "parents"
+ref_columns = ["id"]

@@ -1,0 +1,12 @@
+[meta]
+version = 1
+schema = "test"
+
+[tables.logs]
+comment = "Table with no primary key"
+
+[tables.logs.columns.message]
+type = "short_text"
+
+[tables.logs.columns.created_at]
+type = "timestamp"

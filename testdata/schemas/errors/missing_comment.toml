@@ -1,0 +1,11 @@
+[meta]
+version = 1
+schema = "test"
+
+[tables.items]
+
+[tables.items.columns.id]
+type = "id"
+
+[tables.items.columns.name]
+type = "short_text"
