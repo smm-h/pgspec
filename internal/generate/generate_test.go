@@ -1,6 +1,7 @@
 package generate
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -308,15 +309,91 @@ func TestDeterminism(t *testing.T) {
 	}
 }
 
-func TestNotImplementedFormats(t *testing.T) {
-	schema := &model.Schema{Name: "test"}
+func TestJSONFormat(t *testing.T) {
+	schema := &model.Schema{
+		Name:       "myapp",
+		Extensions: []string{"pgcrypto"},
+		Enums: []model.Enum{
+			{Schema: "myapp", Name: "role", Values: []string{"admin", "user"}},
+		},
+		Tables: []model.Table{
+			{
+				Name:   "users",
+				Schema: "myapp",
+				Columns: []model.Column{
+					{Name: "id", PGType: "uuid", NotNull: true, DefaultExpr: "gen_random_uuid()"},
+					{Name: "role", PGType: "role", NotNull: true},
+				},
+				PK: []string{"id"},
+				FKs: []model.FK{
+					{Name: "fk_users_self", Columns: []string{"id"}, RefSchema: "myapp", RefTable: "users", RefColumns: []string{"id"}},
+				},
+				Indexes: []model.Index{
+					{Name: "idx_users_role", Columns: []string{"role"}},
+				},
+				Uniques: []model.UniqueConstraint{
+					{Name: "uq_users_id", Columns: []string{"id"}},
+				},
+				Checks: []model.CheckConstraint{
+					{Name: "ck_users_role", Expr: "role <> ''"},
+				},
+				Comment: "All users",
+				Owner:   "app_role",
+			},
+		},
+		CycleGroups: [][]string{{"users"}},
+	}
 
-	for _, format := range []string{"json"} {
-		opts := Options{Format: format}
-		out := Generate(schema, opts)
-		if out != "not implemented" {
-			t.Errorf("Format=%q should return 'not implemented', got: %q", format, out)
-		}
+	opts := Options{Format: "json"}
+	out := Generate(schema, opts)
+
+	// Must be valid JSON.
+	var roundTripped model.Schema
+	if err := json.Unmarshal([]byte(out), &roundTripped); err != nil {
+		t.Fatalf("JSON output is not valid JSON: %v\nOutput:\n%s", err, out)
+	}
+
+	// Verify key fields survived the round-trip.
+	if roundTripped.Name != "myapp" {
+		t.Errorf("expected schema name 'myapp', got %q", roundTripped.Name)
+	}
+	if len(roundTripped.Extensions) != 1 || roundTripped.Extensions[0] != "pgcrypto" {
+		t.Errorf("expected extensions [pgcrypto], got %v", roundTripped.Extensions)
+	}
+	if len(roundTripped.Enums) != 1 || roundTripped.Enums[0].Name != "role" {
+		t.Errorf("expected 1 enum named 'role', got %v", roundTripped.Enums)
+	}
+	if len(roundTripped.Tables) != 1 {
+		t.Fatalf("expected 1 table, got %d", len(roundTripped.Tables))
+	}
+
+	tbl := roundTripped.Tables[0]
+	if tbl.Name != "users" {
+		t.Errorf("expected table 'users', got %q", tbl.Name)
+	}
+	if len(tbl.Columns) != 2 {
+		t.Errorf("expected 2 columns, got %d", len(tbl.Columns))
+	}
+	if len(tbl.FKs) != 1 || tbl.FKs[0].Name != "fk_users_self" {
+		t.Errorf("expected FK 'fk_users_self', got %v", tbl.FKs)
+	}
+	if len(tbl.Indexes) != 1 || tbl.Indexes[0].Name != "idx_users_role" {
+		t.Errorf("expected index 'idx_users_role', got %v", tbl.Indexes)
+	}
+	if len(tbl.Uniques) != 1 || tbl.Uniques[0].Name != "uq_users_id" {
+		t.Errorf("expected unique 'uq_users_id', got %v", tbl.Uniques)
+	}
+	if len(tbl.Checks) != 1 || tbl.Checks[0].Name != "ck_users_role" {
+		t.Errorf("expected check 'ck_users_role', got %v", tbl.Checks)
+	}
+	if tbl.Comment != "All users" {
+		t.Errorf("expected comment 'All users', got %q", tbl.Comment)
+	}
+	if tbl.Owner != "app_role" {
+		t.Errorf("expected owner 'app_role', got %q", tbl.Owner)
+	}
+	if len(roundTripped.CycleGroups) != 1 || roundTripped.CycleGroups[0][0] != "users" {
+		t.Errorf("expected cycle_groups [[users]], got %v", roundTripped.CycleGroups)
 	}
 }
 

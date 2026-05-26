@@ -2,6 +2,7 @@
 package generate
 
 import (
+	"encoding/json"
 	"sort"
 	"strings"
 
@@ -25,6 +26,8 @@ func Generate(schema *model.Schema, opts Options) string {
 		return generateSQL(schema, opts)
 	case "d2":
 		return GenerateD2(schema)
+	case "json":
+		return generateJSON(schema)
 	case "svg":
 		d2Source := GenerateD2(schema)
 		svg, err := RenderSVG(d2Source)
@@ -35,6 +38,15 @@ func Generate(schema *model.Schema, opts Options) string {
 	default:
 		return "not implemented"
 	}
+}
+
+// generateJSON produces pretty-printed JSON output of the full schema.
+func generateJSON(schema *model.Schema) string {
+	data, err := json.MarshalIndent(schema, "", "  ")
+	if err != nil {
+		return "error: " + err.Error()
+	}
+	return string(data)
 }
 
 func generateSQL(schema *model.Schema, opts Options) string {
@@ -101,7 +113,7 @@ func generateSQL(schema *model.Schema, opts Options) string {
 		fks := sortedFKs(t.FKs)
 		for _, fk := range fks {
 			fkCopy := fk
-			fkStmts = append(fkStmts, sql.AlterTableAddFK(t.Schema, t, &fkCopy))
+			fkStmts = append(fkStmts, sql.AlterTableAddFK(t.Schema, t, &fkCopy, opts.Idempotent))
 		}
 	}
 	if len(fkStmts) > 0 {
@@ -115,7 +127,7 @@ func generateSQL(schema *model.Schema, opts Options) string {
 		uqs := sortedUniques(t.Uniques)
 		for _, uq := range uqs {
 			uqCopy := uq
-			uqStmts = append(uqStmts, sql.AlterTableAddUnique(t.Schema, t.Name, &uqCopy))
+			uqStmts = append(uqStmts, sql.AlterTableAddUnique(t.Schema, t.Name, &uqCopy, opts.Idempotent))
 		}
 	}
 	if len(uqStmts) > 0 {
@@ -129,7 +141,7 @@ func generateSQL(schema *model.Schema, opts Options) string {
 		cks := sortedChecks(t.Checks)
 		for _, ck := range cks {
 			ckCopy := ck
-			ckStmts = append(ckStmts, sql.AlterTableAddCheck(t.Schema, t.Name, &ckCopy))
+			ckStmts = append(ckStmts, sql.AlterTableAddCheck(t.Schema, t.Name, &ckCopy, opts.Idempotent))
 		}
 	}
 	if len(ckStmts) > 0 {
@@ -143,7 +155,7 @@ func generateSQL(schema *model.Schema, opts Options) string {
 		idxs := sortedIndexes(t.Indexes)
 		for _, idx := range idxs {
 			idxCopy := idx
-			idxStmts = append(idxStmts, sql.CreateIndex(t.Schema, &idxCopy, t.Name, opts.Idempotent))
+			idxStmts = append(idxStmts, sql.CreateIndex(t.Schema, &idxCopy, t.Name, opts.Idempotent, false))
 		}
 	}
 	if len(idxStmts) > 0 {
