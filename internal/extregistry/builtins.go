@@ -17,12 +17,29 @@ func NewBuiltinRegistry() *Registry {
 
 	r.Register(&Extension{
 		Name:      "btree_gin",
-		Opclasses: []string{"int4_ops", "text_ops", "timestamp_ops"},
+		Opclasses: []string{
+			"int2_ops", "int4_ops", "int8_ops",
+			"float4_ops", "float8_ops", "numeric_ops",
+			"timestamp_ops", "timestamptz_ops", "time_ops", "timetz_ops",
+			"date_ops", "interval_ops", "oid_ops", "money_ops",
+			"char_ops", "varchar_ops", "text_ops", "bytea_ops",
+			"bit_ops", "varbit_ops",
+			"macaddr_ops", "macaddr8_ops", "inet_ops", "cidr_ops",
+			"uuid_ops", "name_ops", "bool_ops", "bpchar_ops", "enum_ops",
+		},
 	})
 
 	r.Register(&Extension{
 		Name:      "btree_gist",
-		Opclasses: []string{"gist_int4_ops", "gist_text_ops", "gist_timestamp_ops"},
+		Opclasses: []string{
+			"gist_int2_ops", "gist_int4_ops", "gist_int8_ops",
+			"gist_float4_ops", "gist_float8_ops", "gist_numeric_ops",
+			"gist_timestamp_ops", "gist_timestamptz_ops", "gist_time_ops", "gist_timetz_ops",
+			"gist_date_ops", "gist_interval_ops", "gist_oid_ops", "gist_money_ops",
+			"gist_macaddr_ops", "gist_macaddr8_ops",
+			"gist_uuid_ops", "gist_text_ops", "gist_bpchar_ops",
+			"gist_inet_ops", "gist_cidr_ops", "gist_bool_ops", "gist_enum_ops",
+		},
 	})
 
 	r.Register(&Extension{
@@ -40,12 +57,12 @@ func NewBuiltinRegistry() *Registry {
 
 	r.Register(&Extension{
 		Name:      "pg_partman",
-		Functions: []string{"create_parent", "run_maintenance_proc"},
+		Functions: []string{"partman.create_parent", "partman.run_maintenance_proc"},
 	})
 
 	r.Register(&Extension{
 		Name:      "pg_cron",
-		Functions: []string{"schedule", "unschedule"},
+		Functions: []string{"cron.schedule", "cron.unschedule"},
 	})
 
 	r.Register(&Extension{

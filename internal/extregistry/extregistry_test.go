@@ -43,6 +43,81 @@ func TestRequiredExtension_Unknown(t *testing.T) {
 	}
 }
 
+func TestRequiredExtension_BtreeGinAllOpclasses(t *testing.T) {
+	r := NewBuiltinRegistry()
+	opclasses := []string{
+		"int2_ops", "int4_ops", "int8_ops",
+		"float4_ops", "float8_ops", "numeric_ops",
+		"timestamp_ops", "timestamptz_ops", "time_ops", "timetz_ops",
+		"date_ops", "interval_ops", "oid_ops", "money_ops",
+		"char_ops", "varchar_ops", "text_ops", "bytea_ops",
+		"bit_ops", "varbit_ops",
+		"macaddr_ops", "macaddr8_ops", "inet_ops", "cidr_ops",
+		"uuid_ops", "name_ops", "bool_ops", "bpchar_ops", "enum_ops",
+	}
+	for _, oc := range opclasses {
+		ext, ok := r.RequiredExtension(oc)
+		if !ok {
+			t.Errorf("expected opclass %s to be found for btree_gin", oc)
+			continue
+		}
+		if ext != "btree_gin" {
+			t.Errorf("expected btree_gin for opclass %s, got %s", oc, ext)
+		}
+	}
+}
+
+func TestRequiredExtension_BtreeGistAllOpclasses(t *testing.T) {
+	r := NewBuiltinRegistry()
+	opclasses := []string{
+		"gist_int2_ops", "gist_int4_ops", "gist_int8_ops",
+		"gist_float4_ops", "gist_float8_ops", "gist_numeric_ops",
+		"gist_timestamp_ops", "gist_timestamptz_ops", "gist_time_ops", "gist_timetz_ops",
+		"gist_date_ops", "gist_interval_ops", "gist_oid_ops", "gist_money_ops",
+		"gist_macaddr_ops", "gist_macaddr8_ops",
+		"gist_uuid_ops", "gist_text_ops", "gist_bpchar_ops",
+		"gist_inet_ops", "gist_cidr_ops", "gist_bool_ops", "gist_enum_ops",
+	}
+	for _, oc := range opclasses {
+		ext, ok := r.RequiredExtension(oc)
+		if !ok {
+			t.Errorf("expected opclass %s to be found for btree_gist", oc)
+			continue
+		}
+		if ext != "btree_gist" {
+			t.Errorf("expected btree_gist for opclass %s, got %s", oc, ext)
+		}
+	}
+}
+
+func TestRequiredExtensionForFunction_SchemaQualified(t *testing.T) {
+	r := NewBuiltinRegistry()
+
+	// pg_partman functions are schema-qualified with partman.
+	for _, fn := range []string{"partman.create_parent", "partman.run_maintenance_proc"} {
+		ext, ok := r.RequiredExtensionForFunction(fn)
+		if !ok {
+			t.Errorf("expected function %s to be found for pg_partman", fn)
+			continue
+		}
+		if ext != "pg_partman" {
+			t.Errorf("expected pg_partman for function %s, got %s", fn, ext)
+		}
+	}
+
+	// pg_cron functions are schema-qualified with cron.
+	for _, fn := range []string{"cron.schedule", "cron.unschedule"} {
+		ext, ok := r.RequiredExtensionForFunction(fn)
+		if !ok {
+			t.Errorf("expected function %s to be found for pg_cron", fn)
+			continue
+		}
+		if ext != "pg_cron" {
+			t.Errorf("expected pg_cron for function %s, got %s", fn, ext)
+		}
+	}
+}
+
 func TestLoadUserExtensions(t *testing.T) {
 	r := NewBuiltinRegistry()
 	r.LoadUserExtensions([]UserExtension{
